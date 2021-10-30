@@ -4,6 +4,8 @@
 
 The script uses `impacket` and `ldap3` to update the GPOs. It implements enough primitives that can be combined (just need to perform minor changes in the code) to achieve different ways of code execution (DLL hijacking, COM junctions, shortcut poisoning, etc.)
 
+Ref.: [A Red Teamer’s Guide to GPOs and OUs](https://wald0.com/?p=179)
+
 # Usage
 
 ```
