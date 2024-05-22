@@ -1872,12 +1872,12 @@ def main():
 
     options = parse_args()
 
-    #if options.k:       
-        #target = helper.get_machine_name(options, options.d)
-
-    if options.password == '' and options.username != '' and options.hashes is None and options.no_pass is not True and options.k is not True:
+    if options.password == '' and options.username != '' and options.hashes is None and options.no_pass is not True and options.k is not True and options.aesKey is None:
         from getpass import getpass
         options.password = getpass("Password:")
+
+    if options.aesKey is not None:
+        options.k = True
 
     if options.hashes is not None:
         lmhash, nthash = options.hashes.split(':')
