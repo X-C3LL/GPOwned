@@ -351,7 +351,7 @@ class GPOhelper:
     def SMBDownloadRecursive(self, path, dst):
         if "sysvol" in path.lower():
             path = self.fixPath(path)
-        print("[*] Enumerating files at \SysVol%s" % path)
+        print("[*] Enumerating files at \\SysVol%s" % path)
         files = self.smbconn.listPath('SysVol', path + "/*")
         for f in files:
             current = path + "/" + f.get_longname()
@@ -361,7 +361,7 @@ class GPOhelper:
                     recursion = self.SMBDownloadRecursive(current, dst)
             else:
                 fh = open(dst + path[path.index("}") + 1:] + "/" + f.get_longname(), "wb")
-                print("[*] Downloading \Sysvol%s" % current)
+                print("[*] Downloading \\Sysvol%s" % current)
                 self.smbconn.getFile('SysVol', current, fh.write)
 
     def SMBWriteFile(self, path, content):
