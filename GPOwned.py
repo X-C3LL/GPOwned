@@ -919,7 +919,7 @@ displayName={display_name}
             self.smbconn.createDirectory("SYSVOL", f"{domain}/Policies/{{{gpo_guid}}}")
             self.smbconn.createDirectory("SYSVOL", f"{domain}/Policies/{{{gpo_guid}}}/Machine")
             self.smbconn.createDirectory("SYSVOL", f"{domain}/Policies/{{{gpo_guid}}}/User")
-            self.smbconn.putFile("SYSVOL", f"inlanefreight.local/Policies/{{{gpo_guid}}}/GPT.INI", fh.read)
+            self.smbconn.putFile("SYSVOL", f"{domain}/Policies/{{{gpo_guid}}}/GPT.INI", fh.read)
 
             fh.close()
             os.remove("./GPT.INI")
@@ -930,7 +930,7 @@ displayName={display_name}
                 fh = open("./GPO.cmt", "w+b")
                 fh.write(comment.encode('utf-8'))
                 fh.seek(0)
-                self.smbconn.putFile("SYSVOL", f"inlanefreight.local/Policies/{{{gpo_guid}}}/GPO.cmt", fh.read)
+                self.smbconn.putFile("SYSVOL", f"{domain}/Policies/{{{gpo_guid}}}/GPO.cmt", fh.read)
 
                 fh.close()
                 os.remove("./GPO.cmt")
@@ -1906,7 +1906,12 @@ def main():
             name = options.name
         records = helper.ldapGPOFromSiteInfo(name)
         for x in records:
-            print("\n[+] Name: %s\n\t[-] distinguishedName: %s\n\t[-] gPLink: %s\n\t[-] objectGUID: %s\n\t[-] objectcategory: %s" % (x["Name"], x["distinguishedName"], x["gPLink"], x["objectGUID"], x['objectcategory']))
+
+            objectGUID = x["objectGUID"]
+            if isinstance(x["objectGUID"].raw_values[0], bytes):
+                objectGUID = uuid.UUID(bytes_le=x["objectGUID"].raw_values[0])
+
+            print("\n[+] Name: %s\n\t[-] distinguishedName: %s\n\t[-] gPLink: %s\n\t[-] objectGUID: %s\n\t[-] objectcategory: %s" % (x["Name"], x["distinguishedName"], x["gPLink"], objectGUID, x['objectcategory']))
 
     # -listou
     if options.listou is True:
