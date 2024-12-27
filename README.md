@@ -463,7 +463,3 @@ proxychains4 -q python3 GPOwned.py -u gabriel -aesKey 0A7FF58D7CB12557E46351FCAB
 ## Ldaps
 
 -use-ldaps have some bugs with ssl error EOF, no ideia if is a problem with the domain of in the code
-
-## Kerberos connection does not return the correct gpLink attribute when using the flag -listgpo
-
-For some reason kerberos return a strange output when asking for the gpLink
