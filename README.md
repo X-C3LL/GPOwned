@@ -30,6 +30,7 @@ usage: GPOwned.py [-h] [-u USERNAME] [-p PASSWORD] [-d DOMAIN]
                   [-default] [-value Registry value] [-service Target service]
                   [-action Service action] [-author Task Author]
                   [-taskname Task Name] [-taskdescription Task description]
+                  [-taskargs Task arguments]
                   [-gpoupdatever] [-usercontext]
 
 GPO Helper - @TheXC3LL
@@ -128,6 +129,8 @@ exploitation:
   -taskname Task Name   Name for the Scheduled Task
   -taskdescription Task description
                         Description for the scheduled task
+  -taskargs Task arguments
+                        Arguments passed to the scheduled task's command
   -gpoupdatever         Update GPO version (GPT.INI file and LDAP object)
   -usercontext          Execute the GPO in the context of the user
 
